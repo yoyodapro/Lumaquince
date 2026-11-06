@@ -33,7 +33,7 @@ public:
         Stop();
     }
 
-    // Add/Start/Stop are controlled by the cache owner. Take may run concurrently with
+    // Add/Start/Stop/Reset are controlled by the cache owner. Take may run concurrently with
     // worker completion, and Stop joins workers before external build resources disappear.
     bool Add(const Key& key, size_t capture_bytes, Build build) {
         if (started || stopped || entries.contains(key) ||
@@ -117,6 +117,16 @@ public:
             std::scoped_lock lock{mutex};
             entries.clear();
         }
+    }
+
+    // The owner has paused cache consumers before a new disk-resource load. Finish the
+    // previous generation before admitting any captures or reusing its fixed budgets.
+    void Reset() {
+        Stop();
+        std::scoped_lock lock{mutex};
+        captured_bytes = 0;
+        started = false;
+        stopped = false;
     }
 
 private:

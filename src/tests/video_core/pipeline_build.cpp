@@ -406,3 +406,45 @@ TEST_CASE("Prebuild cancellation and adoption safely race a running build",
         }
     }
 }
+
+TEST_CASE("Prebuild reload joins the old generation and restores its full capture budget",
+          "[video_core][pipeline_prebuild]") {
+    Vulkan::PipelinePrebuild<int, int> cache{2, 100, false};
+    std::promise<void> entered, release;
+    auto gate = release.get_future().share();
+    auto input = std::make_shared<int>(42);
+    std::weak_ptr<int> old_input = input;
+    REQUIRE(cache.Add(1, 100, [input = std::move(input), &entered, gate] {
+        entered.set_value();
+        gate.wait();
+        return std::make_unique<int>(*input);
+    }));
+    cache.Start(1);
+    entered.get_future().wait();
+    auto reset = std::async(std::launch::async, [&] { cache.Reset(); });
+    const bool joined = Pending(reset);
+    release.set_value();
+    reset.get();
+    REQUIRE(joined);
+    REQUIRE(old_input.expired());
+    REQUIRE_FALSE(cache.Take(1));
+
+    std::promise<void> next_entered, next_release;
+    auto next_gate = next_release.get_future().share();
+    REQUIRE(cache.Add(1, 100, [] { return std::make_unique<int>(84); }));
+    REQUIRE_FALSE(cache.Add(3, 1, [] { return std::make_unique<int>(0); }));
+    REQUIRE(cache.Add(2, 0, [&] {
+        next_entered.set_value();
+        next_gate.wait();
+        return std::make_unique<int>(7);
+    }));
+    REQUIRE_FALSE(cache.Add(3, 0, [] { return std::make_unique<int>(0); }));
+    cache.Start(1);
+    next_entered.get_future().wait();
+    auto result = cache.Take(1);
+    next_release.set_value();
+    cache.Stop();
+    REQUIRE(result);
+    REQUIRE(*result == 84);
+    REQUIRE_FALSE(cache.Take(1));
+}

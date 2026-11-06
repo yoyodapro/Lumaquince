@@ -34,6 +34,12 @@ result without waiting; if one is unavailable the normal runtime path builds the
 Cancellation joins active builds before releasing external resources. This does not compile
 unseen shaders and may compete for CPU or driver resources while playing.
 
+Cache reload resets the background helper only after joining its previous generation and
+releasing its inputs/results. The fixed capture/entry budgets can then be reused for the new
+load. Explicit cancellation and destruction keep Stop terminal. Primary graphics worker pools
+must remain live until builds complete: reload drains runtime builds before preload cancellation,
+and a cancelled frontend does not resume draws on that stopped pool.
+
 Existing full-key preload deduplication, malformed-cache guards, two-session history, two-minute
 save cadence, cache version separation and memory-budget residency policies are preserved.
 Preload-all continues to preload all accepted cached keys, leaving no skipped work to speculate.

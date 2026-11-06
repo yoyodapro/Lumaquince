@@ -94,6 +94,8 @@ class PipelineBuild {
     };
 
 public:
+    // A supplied pool must remain live until this build completes. Runtime cache reloads
+    // drain graphics builds before cancelling preload jobs; shutdown cannot resume draws.
     PipelineBuild(Common::ThreadWorker* workers, std::function<void()> task)
         : state{std::make_shared<State>(std::move(task))} {
         if (workers) {
