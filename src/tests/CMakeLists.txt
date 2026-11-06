@@ -96,6 +96,7 @@ add_executable(tests
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
     video_core/spirv_atomic_cas.cpp
+    video_core/spirv_storage_alignment.cpp
     video_core/spirv_mesh_topology.cpp
     common/bit_field.cpp
     common/bounded_spin_wait.cpp
