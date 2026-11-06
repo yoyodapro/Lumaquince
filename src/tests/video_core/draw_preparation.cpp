@@ -1119,6 +1119,11 @@ TEST_CASE("Mapped readback publishes host-visible GPU bytes and preserves newer 
         std::memset(f.bytes + 0x10050, 0x79, 16);
         f.cache->WriteMemory(0x20050, 16, false);
         Access::Synchronize(*f.cache, id, 0x20000, 0x1000);
+        // Setup uploads the newer CPU bytes through staging. The fake backend counts both
+        // upload and download staging allocations together; measure only the readback delta.
+        REQUIRE(f.runtime.uploads != 0);
+        REQUIRE(buffer.bytes[0x50] == 0x79);
+        const auto allocations_before_readback = f.runtime.allocations;
         f.runtime.before_completion = [&] {
             CHECK(f.bytes[0x10040] == 0);
             CHECK(f.bytes[0x10050] == 0x79);
@@ -1140,7 +1145,9 @@ TEST_CASE("Mapped readback publishes host-visible GPU bytes and preserves newer 
         CHECK(f.runtime.host_read_finishes == 1);
         CHECK(f.runtime.finishes == 1);
         CHECK(f.runtime.waits == 0);
-        CHECK(f.runtime.allocations == 0);
+        CHECK(f.runtime.allocations == allocations_before_readback);
+        CHECK(f.runtime.downloads == 0);
+        CHECK(f.runtime.download_bytes == 0);
         for (size_t i = 0x40; i < 0x80; ++i) {
             CHECK(f.bytes[0x10000 + i] == (i >= 0x50 && i < 0x60 ? 0x79 : 0x68));
         }
