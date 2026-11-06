@@ -141,6 +141,7 @@ add_executable(tests
     video_core/native_macro_fifo.cpp
     video_core/uniform_stream_reuse.cpp
     video_core/index_binding_state.cpp
+    video_core/input_assembly_state.cpp
     video_core/storage_binding_cache.cpp
     video_core/draw_preparation.cpp
     video_core/command_writer.cpp

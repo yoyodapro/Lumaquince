@@ -96,19 +96,6 @@ VkStencilOpState GetStencilFaceState(const StencilFace& face) {
     };
 }
 
-bool SupportsPrimitiveRestart(VkPrimitiveTopology topology) {
-    static constexpr std::array unsupported_topologies{
-        VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
-        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY,
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY,
-        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        // VK_PRIMITIVE_TOPOLOGY_QUAD_LIST_EXT,
-    };
-    return std::ranges::find(unsupported_topologies, topology) == unsupported_topologies.end();
-}
-
 bool IsLine(VkPrimitiveTopology topology) {
     static constexpr std::array line_topologies{
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
@@ -276,7 +263,8 @@ GraphicsPipeline::GraphicsPipeline(
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)} {
+      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
+      has_tessellation{spv_modules[1] || spv_modules[2]} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -892,20 +880,17 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (!vertex_binding_divisors.empty()) {
         vertex_input_ci.pNext = &input_divisor_ci;
     }
-    const bool has_tess_stages = spv_modules[1] || spv_modules[2];
-    auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
-    if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
-        if (!has_tess_stages) {
+    const auto raw_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
+    const auto effective_topology = InputAssemblyTopology(raw_topology);
+    const auto input_assembly_topology = effective_topology.value_or(raw_topology);
+    if (effective_topology && input_assembly_topology != raw_topology) {
+        if (raw_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
             LOG_WARNING(Render_Vulkan, "Patch topology used without tessellation, using points");
-            input_assembly_topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-        }
-    } else {
-        if (has_tess_stages) {
+        } else {
             // The Vulkan spec requires patch list IA topology be used with tessellation
             // shader stages. Forcing it fixes a crash on some drivers
             LOG_WARNING(Render_Vulkan,
                         "Patch topology not used with tessellation, using patch list");
-            input_assembly_topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
         }
     }
     const VkPipelineInputAssemblyStateCreateInfo input_assembly_ci{
@@ -913,17 +898,10 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .pNext = nullptr,
         .flags = 0,
         .topology = input_assembly_topology,
-        .primitiveRestartEnable =
-        // MoltenVK/Metal always has primitive restart enabled and cannot disable it
-        device.IsMoltenVK() ? VK_TRUE :
-        (dynamic.primitive_restart_enable != 0 &&
-                ((input_assembly_topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
-                  device.IsTopologyListPrimitiveRestartSupported()) ||
-                 SupportsPrimitiveRestart(input_assembly_topology) ||
-                 (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
-                  device.IsPatchListPrimitiveRestartSupported()))
-            ? VK_TRUE
-            : VK_FALSE),
+        .primitiveRestartEnable = InputAssemblyRestartEnabled(
+            input_assembly_topology, dynamic.primitive_restart_enable != 0, device.IsMoltenVK(),
+            device.IsTopologyListPrimitiveRestartSupported(),
+            device.IsPatchListPrimitiveRestartSupported()),
     };
     const VkPipelineTessellationStateCreateInfo tessellation_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,

@@ -20,6 +20,7 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
+#include "video_core/renderer_vulkan/input_assembly_state.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
@@ -120,6 +121,11 @@ public:
     [[nodiscard]] bool IsMeshPipeline() const noexcept {
         return stage_infos[0].is_task || stage_infos[0].is_mesh;
     }
+
+    [[nodiscard]] std::optional<VkPrimitiveTopology> InputAssemblyTopology(
+        VkPrimitiveTopology topology) const noexcept {
+        return ResolveInputAssemblyTopology(topology, IsMeshPipeline(), has_tessellation);
+    }
     GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = delete;
     GraphicsPipeline(GraphicsPipeline&&) noexcept = delete;
 
@@ -202,6 +208,8 @@ private:
     u64 last_use_frame{};
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
+    // Retain stage presence after the worker releases the shader modules.
+    const bool has_tessellation;
 
     std::array<Shader::Info, NUM_STAGES> stage_infos;
     std::array<u32, 5> enabled_uniform_buffer_masks{};

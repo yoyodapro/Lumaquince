@@ -190,27 +190,6 @@ DrawParams MakeDrawParams(const Tegra::Engines::Maxwell3D::DrawManager::State& d
     return params;
 }
 
-bool SupportsPrimitiveRestart(VkPrimitiveTopology topology) {
-    switch (topology) {
-    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
-    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
-    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
-    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
-    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
-    case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
-        return false;
-    default:
-        return true;
-    }
-}
-
-bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topology) {
-    return ((topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
-             device.IsTopologyListPrimitiveRestartSupported()) ||
-            SupportsPrimitiveRestart(topology) ||
-            (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST &&
-             device.IsPatchListPrimitiveRestartSupported()));
-}
 } // Anonymous namespace
 
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
@@ -2207,8 +2186,17 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     auto& flags = maxwell3d->dirty.flags;
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
     const bool topology_changed = state_tracker.ChangePrimitiveTopology(topology);
+    // The built-in DrawTexture blit has static input assembly; no guest topology applies.
+    const auto input_assembly_topology = pipeline
+        ? pipeline->InputAssemblyTopology(MaxwellToVK::PrimitiveTopology(device, topology))
+        : std::nullopt;
+    const bool input_assembly_changed =
+        state_tracker.ChangeInputAssemblyTopology(input_assembly_topology);
     if (topology_changed) {
         flags[Dirty::DepthBiasEnable] = true;
+        flags[Dirty::PrimitiveRestartEnable] = true;
+    }
+    if (input_assembly_changed) {
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
 
@@ -2231,16 +2219,17 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
             UpdateDepthWriteEnable(regs);
             UpdateStencilTestEnable(regs);
         }
-        if (topology_changed) {
-            scheduler.Record([topology_vk = MaxwellToVK::PrimitiveTopology(device, topology)](
-                                 vk::CommandBuffer cmdbuf) {
+        if (input_assembly_changed && input_assembly_topology) {
+            scheduler.Record([topology_vk = *input_assembly_topology](vk::CommandBuffer cmdbuf) {
                 cmdbuf.SetPrimitiveTopologyEXT(topology_vk);
             });
         }
     }
 
     if (device.IsExtExtendedDynamicState2Supported()) {
-        UpdatePrimitiveRestartEnable(regs);
+        if (input_assembly_topology) {
+            UpdatePrimitiveRestartEnable(regs, *input_assembly_topology);
+        }
         UpdateRasterizerDiscardEnable(regs);
         UpdateDepthBiasEnable(regs);
     }
@@ -2652,18 +2641,16 @@ void RasterizerVulkan::UpdateDepthWriteEnable(Tegra::Engines::Maxwell3D::Regs& r
     });
 }
 
-void RasterizerVulkan::UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                                  VkPrimitiveTopology topology) {
     if (!state_tracker.TouchPrimitiveRestartEnable()) {
         return;
     }
 
-    bool enable = regs.primitive_restart.enabled != 0;
-    if (device.IsMoltenVK()) {
-        enable = true;
-    } else if (enable) {
-        const auto topology = MaxwellToVK::PrimitiveTopology(device, maxwell3d->draw_manager.draw_state.topology);
-        enable = IsPrimitiveRestartSupported(device, topology);
-    }
+    const bool enable = InputAssemblyRestartEnabled(
+        topology, regs.primitive_restart.enabled != 0, device.IsMoltenVK(),
+        device.IsTopologyListPrimitiveRestartSupported(),
+        device.IsPatchListPrimitiveRestartSupported());
 
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetPrimitiveRestartEnableEXT(enable);

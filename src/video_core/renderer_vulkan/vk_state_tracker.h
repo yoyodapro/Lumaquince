@@ -12,6 +12,7 @@
 #include "common/common_types.h"
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_vulkan/input_assembly_state.h"
 
 namespace Tegra {
 namespace Control {
@@ -86,6 +87,7 @@ public:
     void InvalidateCommandBufferState() {
         (*flags) |= invalidation_flags;
         current_topology = INVALID_TOPOLOGY;
+        input_assembly_topology.Invalidate();
         stencil_reset = true;
     }
 
@@ -288,6 +290,10 @@ public:
 
     void SetupTables(Tegra::Control::ChannelState& channel_state);
 
+    bool ChangeInputAssemblyTopology(std::optional<VkPrimitiveTopology> topology) {
+        return input_assembly_topology.Update(topology);
+    }
+
     void ChangeChannel(Tegra::Control::ChannelState& channel_state);
 
     void InvalidateState();
@@ -311,6 +317,7 @@ private:
     Tegra::Engines::Maxwell3D::DirtyState::Flags default_flags;
     Tegra::Engines::Maxwell3D::DirtyState::Flags invalidation_flags;
     Maxwell::PrimitiveTopology current_topology = INVALID_TOPOLOGY;
+    InputAssemblyTopologyState input_assembly_topology;
     bool two_sided_stencil = false;
     StencilProperties front{};
     StencilProperties back{};

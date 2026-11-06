@@ -213,7 +213,8 @@ private:
     void UpdateDepthTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthCompareOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                      VkPrimitiveTopology topology);
     void UpdateRasterizerDiscardEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateConservativeRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateLineStippleEnable(Tegra::Engines::Maxwell3D::Regs& regs);
