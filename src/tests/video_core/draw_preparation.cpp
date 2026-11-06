@@ -1034,3 +1034,54 @@ TEST_CASE("Batched downloads preserve newer CPU bytes alongside pending GPU data
     }
     CHECK_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
 }
+
+TEST_CASE("Device block-read translations do not survive manager lifetime reuse",
+          "[video_core][draw_preparation][device_translation_lifetime]") {
+    Fixture f;
+    std::optional<Tegra::MaxwellDeviceMemoryManager> manager;
+    const void* first_address = nullptr;
+    constexpr std::array<u8, 3> markers{0x31, 0x72, 0xb4};
+    for (size_t lifetime = 0; lifetime < markers.size(); ++lifetime) {
+        CAPTURE(lifetime);
+        manager.emplace(f.physical);
+        if (lifetime == 0) {
+            first_address = &*manager;
+        }
+        REQUIRE(static_cast<const void*>(&*manager) == first_address);
+        manager->BindInterface(&f.rasterizer);
+        const auto process_id = manager->RegisterProcess(&f.process->GetMemory());
+        const VAddr backing_address = 0x11000 + lifetime * 0x10000;
+        u8* const backing = f.bytes + backing_address - 0x10000;
+        std::fill_n(backing, 0x2000, markers[lifetime]);
+        manager->Map(0x60000, backing_address, 0x2000, process_id);
+        REQUIRE(manager->GetPointer<u8>(0x60007) == backing + 7);
+
+        // Both physical pages stay alive in the fixture, so a stale translation returns a
+        // distinct old marker deterministically rather than dereferencing freed memory.
+        std::array<u8, 32> cross_page{};
+        manager->ReadBlockUnsafe(0x60ff0, cross_page.data(), cross_page.size());
+        REQUIRE(std::ranges::all_of(cross_page,
+                                    [&](u8 value) { return value == markers[lifetime]; }));
+        std::array<u8, 32> unsafe_read{}, safe_read{};
+        manager->ReadBlockUnsafe(0x60007, unsafe_read.data(), unsafe_read.size());
+        manager->ReadBlock(0x60007, safe_read.data(), safe_read.size());
+        CHECK(std::ranges::all_of(unsafe_read,
+                                  [&](u8 value) { return value == markers[lifetime]; }));
+        CHECK(std::ranges::all_of(safe_read,
+                                  [&](u8 value) { return value == markers[lifetime]; }));
+
+        if (lifetime == markers.size() - 1) {
+            // Ordinary mapping-generation invalidation must still work within one lifetime.
+            manager->Unmap(0x60000, 0x2000);
+            std::fill_n(f.bytes + 0x31000, 0x2000, 0xd5);
+            manager->Map(0x60000, 0x41000, 0x2000, process_id);
+            manager->ReadBlockUnsafe(0x60007, unsafe_read.data(), unsafe_read.size());
+            manager->ReadBlock(0x60007, safe_read.data(), safe_read.size());
+            CHECK(std::ranges::all_of(unsafe_read, [](u8 value) { return value == 0xd5; }));
+            CHECK(std::ranges::all_of(safe_read, [](u8 value) { return value == 0xd5; }));
+        }
+        manager->Unmap(0x60000, 0x2000);
+        manager->UnregisterProcess(process_id);
+        manager.reset();
+    }
+}
