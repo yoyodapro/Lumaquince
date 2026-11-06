@@ -13,12 +13,11 @@
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
-#ifndef _WIN32
 #include "common/string_util.h"
-#endif
 
 #include "core/core.h"
 #include "core/file_sys/common_funcs.h"
+#include "core/file_sys/builtin_adaptive_timing.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/ips_layer.h"
@@ -107,18 +106,8 @@ VirtualDir FindSubdirectoryCaseless(const VirtualDir dir, std::string_view name)
 #endif
 }
 
-std::optional<std::vector<Core::Memory::CheatEntry>> ReadCheatFileFromFolder(
-    u64 title_id, const PatchManager::BuildID& build_id_, const VirtualDir& base_path, bool upper) {
-    const auto build_id_raw = Common::HexToString(build_id_, upper);
-    const auto build_id = build_id_raw.substr(0, sizeof(u64) * 2);
-    const auto file = base_path->GetFile(fmt::format("{}.txt", build_id));
-
-    if (file == nullptr) {
-        LOG_INFO(Common_Filesystem, "No cheats file found for title_id={:016X}, build_id={}",
-                 title_id, build_id);
-        return std::nullopt;
-    }
-
+std::optional<std::vector<Core::Memory::CheatEntry>> ReadCheatFile(
+    u64 title_id, std::string_view build_id, const VirtualFile& file) {
     std::vector<u8> data(file->GetSize());
     if (file->Read(data.data(), data.size()) != data.size()) {
         LOG_INFO(Common_Filesystem, "Failed to read cheats file for title_id={:016X}, build_id={}",
@@ -456,12 +445,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
     const auto load_dir = GetModificationLoadRoot();
-    if (load_dir == nullptr) {
-        LOG_ERROR(Loader, "Cannot load mods for invalid title_id={:016X}", title_id);
-        return nso;
-    }
-
-    auto patch_dirs = load_dir->GetSubdirectories();
+    auto patch_dirs = load_dir ? load_dir->GetSubdirectories() : std::vector<VirtualDir>{};
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
     const auto patches = CollectPatches(patch_dirs, build_id);
@@ -485,6 +469,24 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     }
 
     const auto disabled = GetDisabledAddons();
+    if (title_id == BuiltinAdaptiveTiming::TitleId && name == "main") {
+        const bool enabled = std::find(disabled.begin(), disabled.end(),
+                                       BuiltinAdaptiveTiming::Name) == disabled.end();
+        const auto reason = BuiltinAdaptiveTiming::Apply(out, {
+            .title_id = title_id,
+            .module = name,
+            .enabled = enabled,
+            .has_program_arguments = !Settings::values.program_args.GetValue().empty(),
+            .has_external_code_patch = !patches.empty(),
+        });
+        if (reason.empty()) {
+            LOG_INFO(Loader, "    - Applying built-in patch \"{}\" (exact build; experimental)",
+                     BuiltinAdaptiveTiming::Name);
+        } else {
+            LOG_INFO(Loader, "    - Skipping \"{}\": {}", BuiltinAdaptiveTiming::Name, reason);
+        }
+    }
+
     for (const auto& patch : BUILTIN_PATCHES) {
         if (patch.title_id != title_id || patch.module != name) {
             continue;
@@ -540,6 +542,10 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
 
+    if (title_id == BuiltinAdaptiveTiming::TitleId && name == "main") {
+        return true;
+    }
+
     if (std::ranges::any_of(BUILTIN_PATCHES, [&](const BuiltinPatch& patch) {
             return patch.title_id == title_id && patch.module == name;
         })) {
@@ -572,13 +578,38 @@ std::vector<Core::Memory::CheatEntry> PatchManager::CreateCheatList(const BuildI
 
     // <mod dir> / <folder> / cheats / <build id>.txt
     std::vector<Core::Memory::CheatEntry> out;
+    const auto upper_build_id = Common::HexToString(build_id_, true).substr(0, sizeof(u64) * 2);
+    const auto lower_name = Common::HexToString(build_id_, false).substr(0, sizeof(u64) * 2) + ".txt";
+    const auto upper_name = upper_build_id + ".txt";
     for (const auto& subdir : patch_dirs) {
         if (std::find(disabled.cbegin(), disabled.cend(), subdir->GetName()) == disabled.cend()) {
             if (auto cheats_dir = FindSubdirectoryCaseless(subdir, "cheats"); cheats_dir != nullptr) {
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, true))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
-                if (auto const res = ReadCheatFileFromFolder(title_id, build_id_, cheats_dir, false))
-                    std::copy(res->begin(), res->end(), std::back_inserter(out));
+                // Enumerate actual entries once: upper/lower lookups can resolve to the same
+                // Windows file, and an all-numeric build id has identical spellings everywhere.
+                auto files = cheats_dir->GetFiles();
+                std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
+                    return left->GetName() < right->GetName();
+                });
+                bool found = false;
+                for (const auto& file : files) {
+                    const auto name = file->GetName();
+                    bool matches = name == upper_name || name == lower_name;
+#ifdef _WIN32
+                    matches = matches || Common::ToLower(name) == lower_name;
+#endif
+                    if (!matches) {
+                        continue;
+                    }
+                    found = true;
+                    if (const auto res = ReadCheatFile(title_id, upper_build_id, file)) {
+                        std::copy(res->begin(), res->end(), std::back_inserter(out));
+                    }
+                }
+                if (!found) {
+                    LOG_INFO(Common_Filesystem,
+                             "No cheats file found for title_id={:016X}, build_id={}",
+                             title_id, upper_build_id);
+                }
             }
         }
     }
@@ -1086,6 +1117,18 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
         out.push_back({.enabled = !patch_disabled,
                        .name = std::string{patch.name},
                        .version = "IPS",
+                       .type = PatchType::Mod,
+                       .program_id = title_id,
+                       .title_id = title_id,
+                       .source = PatchSource::Unknown});
+    }
+
+    if (title_id == BuiltinAdaptiveTiming::TitleId) {
+        const bool enabled = std::find(disabled.begin(), disabled.end(),
+                                       BuiltinAdaptiveTiming::Name) == disabled.end();
+        out.push_back({.enabled = enabled,
+                       .name = std::string{BuiltinAdaptiveTiming::Name},
+                       .version = "Built-in / exact build",
                        .type = PatchType::Mod,
                        .program_id = title_id,
                        .title_id = title_id,

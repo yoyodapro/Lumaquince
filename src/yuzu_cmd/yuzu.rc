@@ -9,7 +9,7 @@
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
-YUZU_ICON               ICON                    "../../dist/lichii.ico"
+YUZU_ICON               ICON                    "../../dist/lumaquince.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -18,3 +18,32 @@ YUZU_ICON               ICON                    "../../dist/lichii.ico"
 //
 
 0                       RT_MANIFEST             "../../dist/yuzu.manifest"
+
+// Lumaquince product metadata; original source copyright notices remain above.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS VS_FF_PRERELEASE
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "Lumaquince 0.1.0 Preview 1\0"
+            VALUE "FileVersion", "0.1.0-preview.1\0"
+            VALUE "InternalName", "lumaquince-cli\0"
+            VALUE "OriginalFilename", "lumaquince-cli.exe\0"
+            VALUE "ProductName", "Lumaquince\0"
+            VALUE "ProductVersion", "0.1.0-preview.1\0"
+            VALUE "LegalCopyright", "See bundled copyright and license notices.\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

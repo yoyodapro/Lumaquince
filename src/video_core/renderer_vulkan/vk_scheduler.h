@@ -160,6 +160,10 @@ public:
     /// Invalidates current command buffer state except for render passes
     void InvalidateState();
 
+    [[nodiscard]] u64 RecordingEpoch() const noexcept {
+        return recording_epoch;
+    }
+
     /// Assigns the query cache.
     void SetQueryCache(VideoCommon::QueryCacheBase<QueryCacheParams>& query_cache_) {
         query_cache = &query_cache_;
@@ -489,6 +493,7 @@ private:
     std::function<void()> on_submit;
 
     State state;
+    u64 recording_epoch{};
 
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};

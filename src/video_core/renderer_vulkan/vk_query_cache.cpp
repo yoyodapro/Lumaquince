@@ -4,9 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <bit>
 #include <cstddef>
 #include <limits>
-#include <map>
 #include <memory>
 #include <span>
 #include <type_traits>
@@ -18,6 +18,8 @@
 #include "common/common_types.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/query_cache/bank_bookkeeping.h"
+#include "video_core/query_cache/copy_batches.h"
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/query_cache/query_cache.h"
 #include "video_core/rasterizer_interface.h"
@@ -219,6 +221,13 @@ public:
         // Time's title screen and file select reached 16,384 slots over 64 banks (its gameplay
         // windows span at most 36 slots). Past a bank, drop the count as a reset would.
         if (current_query && current_query->size_slots > SamplesQueryBank::BANK_SIZE) {
+            ++bounded_query_resets;
+            if (std::has_single_bit(bounded_query_resets)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Discarding accumulated occlusion samples after {} slots at submission "
+                            "(bounded-query reset #{}); a later guest report may be incomplete",
+                            current_query->size_slots, bounded_query_resets);
+            }
             ResetCounter();
         }
     }
@@ -445,24 +454,16 @@ private:
     TextureCache& texture_cache;
     template <bool is_ordered, typename Func>
     void ApplyBanksWideOp(std::vector<size_t>& queries, Func&& func) {
-        std::conditional_t<is_ordered, std::map<size_t, std::pair<size_t, size_t>>,
-                           ::Common::unordered_map<size_t, std::pair<size_t, size_t>>>
-            indexer;
+        VideoCommon::QueryBankRanges<is_ordered> indexer;
         for (auto q : queries) {
             auto* query = GetQuery(q);
             ApplyBankOp(query, [&indexer](SamplesQueryBank* bank, size_t start, size_t amount) {
-                auto id_ = bank->GetIndex();
-                auto pair = indexer.try_emplace(id_, (std::numeric_limits<size_t>::max)(),
-                                                (std::numeric_limits<size_t>::min)());
-                auto& current_pair = pair.first->second;
-                current_pair.first = (std::min)(current_pair.first, start);
-                current_pair.second = (std::max)(current_pair.second, amount + start);
+                indexer.Add(bank->GetIndex(), start, amount);
             });
         }
-        for (auto& cont : indexer) {
-            func(&bank_pool.GetBank(cont.first), cont.second.first,
-                 cont.second.second - cont.second.first);
-        }
+        indexer.ForEach([&](size_t bank, size_t start, size_t amount) {
+            func(&bank_pool.GetBank(bank), start, amount);
+        });
     }
 
     void ReserveBank() {
@@ -491,16 +492,7 @@ private:
         current_bank->AddReference(1);
         num_slots_used++;
         if (current_query) {
-            size_t bank_id = current_query->start_bank_id;
-            size_t banks_set = current_query->size_banks - 1;
-            bool found = bank_id == current_bank_id;
-            while (!found && banks_set > 0) {
-                SamplesQueryBank& some_bank = bank_pool.GetBank(bank_id);
-                bank_id = some_bank.next_bank - 1;
-                found = bank_id == current_bank_id;
-                banks_set--;
-            }
-            if (!found) {
+            if (current_query_tail.Append(current_bank_id)) {
                 current_query->size_banks++;
             }
             current_query->size_slots++;
@@ -511,6 +503,7 @@ private:
             current_query->size_banks = 1;
             current_query->start_slot = new_slot;
             current_query->size_slots = 1;
+            current_query_tail.Reset(current_bank_id);
         }
     }
 
@@ -624,7 +617,9 @@ private:
     size_t last_accumulation_checkpoint{};
     bool accumulation_since_last_sync{};
     VideoCommon::HostQueryBase* current_query;
+    VideoCommon::QueryBankTail current_query_tail;
     bool has_started{};
+    u64 bounded_query_resets{};
     std::mutex flush_guard;
     std::optional<QueriesPrefixScanPass> queries_prefix_scan_pass;
 };
@@ -1367,7 +1362,7 @@ struct QueryCacheRuntimeImpl {
     std::vector<std::pair<DAddr, DAddr>> little_cache;
     std::vector<std::pair<VkBuffer, VkDeviceSize>> buffers_to_upload_to;
     std::vector<size_t> redirect_cache;
-    std::vector<std::vector<VkBufferCopy>> copies_setup;
+    std::vector<VideoCommon::QueryCopy> copies_setup;
 
     // Host conditional rendering data
     std::optional<ConditionalRenderingResolvePass> conditional_resolve_pass;
@@ -1707,17 +1702,18 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
     VkBuffer src_buffer;
     [[maybe_unused]] StagingBufferRef ref;
     impl->copies_setup.clear();
-    impl->copies_setup.resize(impl->little_cache.size());
+    impl->copies_setup.reserve(values.size());
     if constexpr (SyncValuesType::GeneratesBaseBuffer) {
         ref = impl->staging_pool.Request(total_size, MemoryUsage::Upload);
         size_t current_offset = ref.offset;
         size_t accumulated_size = 0;
         for (size_t i = 0; i < values.size(); i++) {
             size_t which_copy = impl->redirect_cache[i];
-            impl->copies_setup[which_copy].emplace_back(VkBufferCopy{
-                .srcOffset = current_offset + accumulated_size,
-                .dstOffset = impl->buffers_to_upload_to[which_copy].second + values[i].address -
-                             impl->little_cache[which_copy].first,
+            impl->copies_setup.emplace_back(VideoCommon::QueryCopy{
+                .destination = which_copy,
+                .src_offset = current_offset + accumulated_size,
+                .dst_offset = impl->buffers_to_upload_to[which_copy].second + values[i].address -
+                              impl->little_cache[which_copy].first,
                 .size = values[i].size,
             });
             std::memcpy(ref.mapped_span.data() + accumulated_size, &values[i].value,
@@ -1728,10 +1724,11 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
     } else {
         for (size_t i = 0; i < values.size(); i++) {
             size_t which_copy = impl->redirect_cache[i];
-            impl->copies_setup[which_copy].emplace_back(VkBufferCopy{
-                .srcOffset = values[i].offset,
-                .dstOffset = impl->buffers_to_upload_to[which_copy].second + values[i].address -
-                             impl->little_cache[which_copy].first,
+            impl->copies_setup.emplace_back(VideoCommon::QueryCopy{
+                .destination = which_copy,
+                .src_offset = values[i].offset,
+                .dst_offset = impl->buffers_to_upload_to[which_copy].second + values[i].address -
+                              impl->little_cache[which_copy].first,
                 .size = values[i].size,
             });
         }
@@ -1739,11 +1736,29 @@ void QueryCacheRuntime::SyncValues(std::span<SyncValuesType> values, VkBuffer ba
     }
 
     impl->scheduler.RequestOutsideRenderPassOperationContext();
-    impl->scheduler.Record([src_buffer, dst_buffers = std::move(impl->buffers_to_upload_to), vk_copies = std::move(impl->copies_setup)](vk::CommandBuffer cmdbuf) {
-        size_t size = dst_buffers.size();
-        for (size_t i = 0; i < size; i++) {
-            cmdbuf.CopyBuffer(src_buffer, dst_buffers[i].first, vk_copies[i]);
-        }
+    impl->scheduler.Record([src_buffer, dst_buffers = std::move(impl->buffers_to_upload_to),
+                            vk_copies = std::move(impl->copies_setup)](vk::CommandBuffer cmdbuf) {
+        static constexpr VkMemoryBarrier COPY_BARRIER{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        std::vector<VkBufferCopy> regions;
+        VideoCommon::ForEachQueryCopyBatch(vk_copies, [&](auto batch) {
+            regions.clear();
+            for (const auto& copy : batch) {
+                regions.push_back(VkBufferCopy{
+                    .srcOffset = copy.src_offset,
+                    .dstOffset = copy.dst_offset,
+                    .size = copy.size,
+                });
+            }
+            // Include earlier SyncValues calls and CPU uploads made while obtaining buffers.
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, COPY_BARRIER);
+            cmdbuf.CopyBuffer(src_buffer, dst_buffers[batch.front().destination].first, regions);
+        });
     });
 }
 

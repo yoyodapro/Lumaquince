@@ -838,6 +838,7 @@ void Scheduler::AllocateNewContext() {
 }
 
 void Scheduler::InvalidateState() {
+    ++recording_epoch;
     state.graphics_pipeline = nullptr;
     state.rescaling_defined = false;
     state.descriptor_buffer_bound = false;
@@ -858,6 +859,7 @@ void Scheduler::EndRenderPass()
             return;
         }
         fragment_barrier_pending = false;
+        ++recording_epoch;
         render_pass_has_stores = false;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);

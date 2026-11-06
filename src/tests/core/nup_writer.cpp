@@ -646,18 +646,21 @@ TEST_CASE("NUP edits default-language metadata in place", "[nup]") {
     edit.display_version = "2.0.0";
     edit.icon = std::vector<u8>{0x89, 0x50, 0x4E, 0x47};
     std::string error;
-    REQUIRE(FileSys::Nup::EditNupMetadata(archive, edit, &error) ==
-            FileSys::Nup::EditResult::Success);
+    const auto edit_result = FileSys::Nup::EditNupMetadata(archive, edit, &error);
     INFO(error);
+    REQUIRE(edit_result == FileSys::Nup::EditResult::Success);
 
-    FileSys::RealVfsFilesystem real;
-    FileSys::NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
-    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
-    REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
-    REQUIRE(nup.GetPackages()[0].title_name == "After");
-    REQUIRE(nup.GetPackages()[0].publisher == "After Inc");
-    REQUIRE(nup.GetPackages()[0].display_version == "2.0.0");
-    REQUIRE(nup.GetPackages()[0].icon == std::vector<u8>{0x89, 0x50, 0x4E, 0x47});
+    {
+        // Release the reader before the next edit replaces the archive on Windows.
+        FileSys::RealVfsFilesystem real;
+        FileSys::NupContainer nup{real.OpenFile(archive.string(), FileSys::OpenMode::Read)};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(nup.VerifyIntegrity({}) == Loader::ResultStatus::Success);
+        REQUIRE(nup.GetPackages()[0].title_name == "After");
+        REQUIRE(nup.GetPackages()[0].publisher == "After Inc");
+        REQUIRE(nup.GetPackages()[0].display_version == "2.0.0");
+        REQUIRE(nup.GetPackages()[0].icon == std::vector<u8>{0x89, 0x50, 0x4E, 0x47});
+    }
 
     const auto probed = FileSys::Nup::ProbeNupMetadata(archive);
     REQUIRE(probed.title_name == "After");
@@ -667,9 +670,9 @@ TEST_CASE("NUP edits default-language metadata in place", "[nup]") {
     FileSys::Nup::MetadataEdit clear;
     clear.title_name = "";
     clear.icon = std::vector<u8>{};
-    REQUIRE(FileSys::Nup::EditNupMetadata(archive, clear, &error) ==
-            FileSys::Nup::EditResult::Success);
+    const auto clear_result = FileSys::Nup::EditNupMetadata(archive, clear, &error);
     INFO(error);
+    REQUIRE(clear_result == FileSys::Nup::EditResult::Success);
     FileSys::RealVfsFilesystem real2;
     FileSys::NupContainer cleared{real2.OpenFile(archive.string(), FileSys::OpenMode::Read)};
     REQUIRE(cleared.GetStatus() == Loader::ResultStatus::Success);

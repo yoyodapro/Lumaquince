@@ -17,11 +17,14 @@
 #include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/file_sys/builtin_adaptive_timing.h"
+#include "adaptive_timing_fixture.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/nso.h"
+#include "core/memory/cheat_engine.h"
 
 namespace {
 
@@ -63,6 +66,7 @@ void WriteIps(const std::filesystem::path& path, u32 word) {
 class PatchManagerTestContext {
 public:
     explicit PatchManagerTestContext(std::optional<u32> user_mod_word = std::nullopt) {
+        Settings::values.program_args.SetValue("");
         for (size_t i = 0; i < TestDirectories.size(); ++i) {
             const auto& [path, name] = TestDirectories[i];
             previous[i] = Common::FS::GetEdenPath(path);
@@ -82,6 +86,7 @@ public:
     }
 
     ~PatchManagerTestContext() {
+        Settings::values.program_args.SetValue(previous_program_args);
         for (size_t i = 0; i < TestDirectories.size(); ++i) {
             Common::FS::SetEdenPath(TestDirectories[i].first, previous[i]);
         }
@@ -98,7 +103,20 @@ public:
                                      system.GetContentProvider()};
     }
 
+    void WriteCheat(std::string_view filename, std::string_view name = "Fixture",
+                    std::string_view mod = "CheatMod") {
+        const auto dir = root / "load" / fmt::format("{:016X}", OcarinaTitleId) / mod / "cheats";
+        std::filesystem::create_directories(dir);
+        std::ofstream file{dir / filename, std::ios::binary};
+        file << '{' << name << "}\n04000000 00000000 00000001\n";
+    }
+
+    void RemoveTitleModDirectory() {
+        std::filesystem::remove(root / "load" / fmt::format("{:016X}", OcarinaTitleId));
+    }
+
 private:
+    const std::string previous_program_args = Settings::values.program_args.GetValue();
     std::array<std::filesystem::path, TestDirectories.size()> previous;
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() /
@@ -130,6 +148,61 @@ u32 PatchMain(PatchManagerTestContext& context, const FileSys::PatchManager::Bui
 }
 
 } // Anonymous namespace
+
+TEST_CASE("Each build-id cheat file is parsed once", "[patch_manager][cheat_files]") {
+    PatchManagerTestContext context;
+    auto build_id = OcarinaBuildId;
+    SECTION("Uppercase filename") {
+        context.WriteCheat("E0F3CCFAF50065AE.txt");
+    }
+    SECTION("Lowercase filename") {
+        context.WriteCheat("e0f3ccfaf50065ae.txt");
+    }
+    SECTION("Numeric build id has identical upper and lower names") {
+        build_id = {};
+        context.WriteCheat("0000000000000000.txt");
+    }
+#ifdef _WIN32
+    SECTION("Windows accepts a mixed-case filename and extension once") {
+        context.WriteCheat("e0F3CcFAf50065Ae.TXT");
+    }
+#endif
+    const auto cheats = context.Manager().CreateCheatList(build_id);
+    REQUIRE(cheats.size() == 1);
+    CHECK(std::string(cheats[0].definition.readable_name.data()) == "Fixture");
+    CHECK(cheats[0].definition.num_opcodes == 3);
+    CHECK(cheats[0].definition.opcodes[2] == 1);
+}
+
+TEST_CASE("Cheat loading retains mod boundaries and excludes disabled or unrelated files",
+          "[patch_manager][cheat_files]") {
+    PatchManagerTestContext context;
+    context.WriteCheat("E0F3CCFAF50065AE.txt", "First", "A");
+    context.WriteCheat("e0f3ccfaf50065ae.txt", "Second", "B");
+    context.WriteCheat("FFFFFFFFFFFFFFFF.txt", "Other build", "A");
+    context.WriteCheat("E0F3CCFAF50065AE.txt.bak", "Backup", "A");
+    auto cheats = context.Manager().CreateCheatList(OcarinaBuildId);
+    REQUIRE(cheats.size() == 2);
+    CHECK(std::string(cheats[0].definition.readable_name.data()) == "First");
+    CHECK(std::string(cheats[1].definition.readable_name.data()) == "Second");
+    Settings::values.disabled_addons[OcarinaTitleId] = {"A"};
+    cheats = context.Manager().CreateCheatList(OcarinaBuildId);
+    REQUIRE(cheats.size() == 1);
+    CHECK(std::string(cheats[0].definition.readable_name.data()) == "Second");
+}
+
+#ifndef _WIN32
+TEST_CASE("Case-sensitive cheat files remain separate and uppercase is loaded first",
+          "[patch_manager][cheat_files]") {
+    PatchManagerTestContext context;
+    context.WriteCheat("E0F3CCFAF50065AE.txt", "Upper");
+    context.WriteCheat("e0f3ccfaf50065ae.txt", "Lower");
+    const auto cheats = context.Manager().CreateCheatList(OcarinaBuildId);
+    REQUIRE(cheats.size() == 2);
+    CHECK(std::string(cheats[0].definition.readable_name.data()) == "Upper");
+    CHECK(std::string(cheats[1].definition.readable_name.data()) == "Lower");
+}
+#endif
 
 TEST_CASE("Built-in Max Resolution patch is gated on build id and original word",
           "[patch_manager]") {
@@ -203,4 +276,86 @@ TEST_CASE("Built-in Max Resolution patch is listed and loaded for Ocarina's main
 
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
     REQUIRE_FALSE(builtin_enabled());
+}
+
+TEST_CASE("Adaptive timing is a separately switchable default-on Add-On",
+          "[patch_manager][adaptive_timing]") {
+    PatchManagerTestContext context;
+    const auto manager = context.Manager();
+    const auto find_timing = [&] {
+        const auto patches = manager.GetPatches();
+        const auto it = std::ranges::find(patches, FileSys::BuiltinAdaptiveTiming::Name,
+                                          &FileSys::Patch::name);
+        REQUIRE(it != patches.end());
+        CHECK(it->version == "Built-in / exact build");
+        CHECK(it->type == FileSys::PatchType::Mod);
+        return it->enabled;
+    };
+    CHECK(find_timing());
+    Settings::values.disabled_addons[OcarinaTitleId] = {
+        std::string{FileSys::BuiltinAdaptiveTiming::Name}};
+    CHECK_FALSE(find_timing());
+    const auto patches = manager.GetPatches();
+    const auto max_resolution = std::ranges::find(patches, MaxResolution, &FileSys::Patch::name);
+    REQUIRE(max_resolution != patches.end());
+    CHECK(max_resolution->enabled);
+    const auto other = context.Manager(OtherTitleId).GetPatches();
+    CHECK(std::ranges::find(other, FileSys::BuiltinAdaptiveTiming::Name,
+                           &FileSys::Patch::name) == other.end());
+}
+
+TEST_CASE("PatchNSO wires adaptive timing guards and external patch precedence",
+          "[patch_manager][adaptive_timing]") {
+    using namespace AdaptiveTimingTest;
+    auto input = Fixture();
+    Put32(input, PatchOffset, TbzInstruction);
+    constexpr auto hook = Timing::HeaderSize + Timing::HookOffset;
+    constexpr auto cave = Timing::HeaderSize + Timing::CaveOffset;
+    const auto check_skipped = [&](const std::vector<u8>& result) {
+        CHECK(Get32(result, hook) == 0x1E201828);
+        CHECK(std::equal(input.begin() + cave, input.begin() + cave + Timing::CaveSize,
+                         result.begin() + cave));
+    };
+    const auto check_applied = [&](const std::vector<u8>& result) {
+        CHECK(Get32(result, hook) == 0x14D57D4F);
+        CHECK(Get32(result, cave) == 0x1E201828);
+        CHECK(Get32(result, cave + 0xA8) == 0x172A8288);
+    };
+
+    SECTION("Default application coexists with Max Resolution") {
+        PatchManagerTestContext context;
+        const auto result = context.Manager().PatchNSO(input, "main");
+        check_applied(result);
+        CHECK(Get32(result, PatchOffset) == BranchInstruction);
+    }
+    SECTION("Missing title mod directory still permits built-ins") {
+        PatchManagerTestContext context;
+        context.RemoveTitleModDirectory();
+        check_applied(context.Manager().PatchNSO(input, "main"));
+    }
+    SECTION("Disabled timing preserves Max Resolution") {
+        PatchManagerTestContext context;
+        Settings::values.disabled_addons[OcarinaTitleId] = {std::string{Timing::Name}};
+        const auto result = context.Manager().PatchNSO(input, "main");
+        check_skipped(result);
+        CHECK(Get32(result, PatchOffset) == BranchInstruction);
+    }
+    SECTION("Program arguments refuse timing without affecting Max Resolution") {
+        PatchManagerTestContext context;
+        Settings::values.program_args.SetValue("synthetic-test-argument");
+        check_skipped(context.Manager().PatchNSO(input, "main"));
+    }
+    SECTION("Enabled non-overlapping external IPS conservatively takes precedence") {
+        PatchManagerTestContext context{NopInstruction};
+        const auto result = context.Manager().PatchNSO(input, "main");
+        check_skipped(result);
+        CHECK(Get32(result, PatchOffset) == NopInstruction);
+    }
+    SECTION("Disabled external IPS does not suppress timing") {
+        PatchManagerTestContext context{NopInstruction};
+        Settings::values.disabled_addons[OcarinaTitleId] = {"UserMod"};
+        const auto result = context.Manager().PatchNSO(input, "main");
+        check_applied(result);
+        CHECK(Get32(result, PatchOffset) == BranchInstruction);
+    }
 }

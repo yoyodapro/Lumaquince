@@ -77,6 +77,9 @@
 namespace Core {
 
 std::atomic<u64> g_nx2_present_count{};
+static_assert(std::atomic<u64>::is_always_lock_free);
+std::array<std::atomic<u64>, 4096> g_nx2_present_times_ns{};
+std::atomic<u32> g_nx2_present_time_services{};
 
 FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
                                          const std::string& path) {
@@ -120,8 +123,17 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 namespace {
 
 // Detect the platform before initializing the kernel memory layout and guest clock.
-bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::size_t program_index) {
+bool IsSwitch2Program(const FileSys::VirtualFile& file, u64& program_id, std::size_t program_index) {
     FileSys::ProgramMetadata metadata;
+    const auto load_npdm = [&](const FileSys::VirtualFile& npdm) {
+        if (npdm == nullptr || metadata.Load(npdm) != Loader::ResultStatus::Success) {
+            return false;
+        }
+        if (program_id == 0) {
+            program_id = metadata.GetTitleID();
+        }
+        return metadata.IsSwitch2();
+    };
     if (FileSys::NupContainer::IsNupFile(file)) {
         FileSys::NupContainer nup{file};
         if (nup.GetStatus() != Loader::ResultStatus::Success) {
@@ -137,8 +149,7 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
         }
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
+        return load_npdm(npdm);
     }
     const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
     if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {
@@ -153,8 +164,7 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
                                  : nullptr;
         const auto exefs = program != nullptr ? program->GetExeFS() : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
+        return load_npdm(npdm);
     }
     if (type == Loader::FileType::NSP || type == Loader::FileType::NSZ) {
         const FileSys::NSP nsp{file, program_id, program_index};
@@ -168,13 +178,11 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
             exefs = program != nullptr ? program->GetExeFS() : nullptr;
         }
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
+        return load_npdm(npdm);
     }
     const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
     const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
-    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-           metadata.IsSwitch2();
+    return load_npdm(npdm);
 }
 
 } // namespace
@@ -184,7 +192,7 @@ struct System::Impl {
         : kernel{system}, fs_controller{system}, hid_core{kernel}, cpu_manager{system},
           reporter{system}, applet_manager{system}, frontend_applets{system}, profile_manager{} {}
 
-    u64 program_id;
+    u64 program_id{};
 
     void Initialize(System& system) {
         device_memory.emplace();
@@ -332,6 +340,12 @@ struct System::Impl {
 
     void InitializeKernel(System& system) {
         LOG_DEBUG(Core, "initialized OK");
+
+        // ShutdownMainProcess releases it after a Switch 2 game; create it before the check below
+        // so an empty slot alone does not rerun the full Initialize.
+        if (!device_memory.has_value()) {
+            device_memory.emplace();
+        }
 
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);
@@ -536,6 +550,13 @@ struct System::Impl {
 
         // Reset all glue registrations
         arp_manager.ResetAll();
+
+        // The guest RAM section keeps every page the game touched until it is destroyed (up to
+        // 12 GiB), and the next Load reuses it. Switch 2 only: Switch 1 keeps its behaviour.
+        // InitializeKernel creates it again, sized for the next game.
+        if (Settings::CurrentProgramIsSwitch2()) {
+            device_memory.reset();
+        }
 
         LOG_DEBUG(Core, "Shutdown OK");
     }

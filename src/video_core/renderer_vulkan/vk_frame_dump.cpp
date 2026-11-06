@@ -236,6 +236,7 @@ void FrameDump::Arm(std::filesystem::path directory_, bool sampled, u64 id) {
     pass_index = 0;
     draws = 0;
     dispatches = 0;
+    draw_metadata = {};
     if (start == std::chrono::steady_clock::time_point{}) {
         start = std::chrono::steady_clock::now();
     }
@@ -414,7 +415,10 @@ void FrameDump::NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> te
     }
 }
 
-void FrameDump::NoteDraw(std::span<const u64> shader_hashes) {
+void FrameDump::NoteDraw(std::span<const u64, 6> shader_hashes) {
+    if (auto line = draw_metadata.Record(draws, pass_index, shader_hashes)) {
+        Enqueue({.tags = std::move(*line)});
+    }
     ++draws;
     for (const u64 hash : shader_hashes) {
         if (hash != 0 && pass_hashes.size() < 32 &&
@@ -699,8 +703,8 @@ void FrameDump::TickFrame() {
     case FrameDumpSchedule::Step::Finish:
         EndPass();
         Drain();
-        Enqueue({.tags = fmt::format(R"("passes":{},"draws":{},"dispatches":{})", pass_index,
-                                     draws, dispatches),
+        Enqueue({.tags = fmt::format(R"("passes":{},"draws":{},"dispatches":{},{})", pass_index,
+                                     draws, dispatches, draw_metadata.Summary()),
                  .summary = true,
                  .truncated = truncated});
         return;

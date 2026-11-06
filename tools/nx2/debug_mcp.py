@@ -25,6 +25,28 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 TOOLS = [
     {
+        "name": "split_spin_budgets",
+        "description": "Read GPU split spin budgets, or set optional front (drain/target), capacity "
+                       "and back budgets for measured diagnostics. Integers only, bounded by the "
+                       "unchanged defaults 16384/4096/8192. Applies to subsequent waits; does not "
+                       "complete or cancel work. Send only reset=true to restore defaults. "
+                       "Session end restores defaults. No measured speedup is implied.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "front": {"type": "integer", "minimum": 0, "maximum": 16384},
+                "capacity": {"type": "integer", "minimum": 0, "maximum": 4096},
+                "back": {"type": "integer", "minimum": 0, "maximum": 8192},
+                "reset": {"const": True},
+            },
+            "additionalProperties": False,
+            "oneOf": [
+                {"required": ["reset"], "maxProperties": 1},
+                {"not": {"required": ["reset"]}},
+            ],
+        },
+    },
+    {
         "name": "status",
         "description": "Game title, program id, build, renderer, paused state, presented frame "
                        "count and fps (measured over fps_window_ms), dump directory, live log "
@@ -32,6 +54,19 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"fps_window_ms": {"type": "integer", "minimum": 0, "maximum": 5000}},
+        },
+    },
+    {
+        "name": "frame_times",
+        "description": "Guest-present frame intervals over seconds (default 5, max 60): mean, "
+                       "fps, percentiles, VSync interval shares (refresh_hz defaults to 60), "
+                       "stutters and the last 120 intervals. Reports ring overflow as truncated.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 60, "default": 5},
+                "refresh_hz": {"type": "number", "exclusiveMinimum": 0, "default": 60},
+            },
         },
     },
     {
@@ -192,6 +227,8 @@ class Adapter:
         params = dict(arguments)
         index = params.pop("index", False)
         timeout = max(int(params.get("timeout_s", 120 if name == "capture_frame" else 5)), 1) + 30
+        if name == "frame_times":
+            timeout = int(params.get("seconds", 5)) + 31
         result = self.emulator.call(name, params, timeout)
         if name == "screenshot":
             png = result.pop("png_base64", None)

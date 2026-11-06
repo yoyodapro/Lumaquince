@@ -105,6 +105,11 @@ void WindowAdaptPass::Draw(const Device& device, RasterizerVulkan& rasterizer, S
 
         cmdbuf.EndRenderPass();
     });
+
+    // Preparing a later layer can submit work before this final draw is recorded.
+    for (auto& layer : layers) {
+        layer.MarkDrawUsed(image_index);
+    }
 }
 
 VkDescriptorSetLayout WindowAdaptPass::GetDescriptorSetLayout() {

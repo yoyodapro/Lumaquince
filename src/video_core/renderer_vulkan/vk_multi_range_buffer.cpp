@@ -5,6 +5,7 @@
 #include <mutex>
 #include <utility>
 
+#include "video_core/renderer_vulkan/multi_range_lifetime.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -169,41 +170,15 @@ SparseBuffer MultiRangeBufferCache::CreateSparse(const Device& device, Scheduler
 }
 
 void MultiRangeBufferCache::RetireEntry(Scheduler& scheduler, Entry& entry) {
-    if (!entry.sparse_handle && !entry.gathered) {
-        return;
-    }
-    if (retired.size() == retired.capacity()) {
-        DrainRetired(scheduler);
-    }
-    if (retired.size() == retired.capacity()) {
-        u64 oldest = retired.front().tick;
-        for (const Retired& item : retired) {
-            if (item.tick < oldest) {
-                oldest = item.tick;
-            }
-        }
-        scheduler.Wait(oldest);
-        DrainRetired(scheduler);
-    }
-    retired.push_back(Retired{
-        .handle = std::move(entry.sparse_handle),
-        .gathered = std::move(entry.gathered),
-        .tick = scheduler.CurrentTick(),
-    });
+    RetireMultiRangeBuffer(retired, scheduler, entry);
 }
 
 void MultiRangeBufferCache::DrainRetired(Scheduler& scheduler) {
-    size_t index = 0;
-    while (index < retired.size()) {
-        if (scheduler.IsFree(retired[index].tick)) {
-            if (index + 1 != retired.size()) {
-                retired[index] = std::move(retired.back());
-            }
-            retired.pop_back();
-        } else {
-            ++index;
-        }
-    }
+    DrainRetiredMultiRangeBuffers(retired, scheduler);
+}
+
+void MultiRangeBufferCache::TickFrame(Scheduler& scheduler) {
+    TickMultiRangeBuffers(retired, scheduler);
 }
 
 MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& scheduler,
@@ -248,14 +223,10 @@ MultiRangeRef MultiRangeBufferCache::Get(const Device& device, Scheduler& schedu
     entry.geometry = geometry;
     entry.content = content;
     entry.size = total;
+    // Gathered copies depend on their sources for cache eviction too (upstream PR #276).
+    entry.owners = MultiRangeOwners(sources);
     if (CanBindSparse(sources)) {
         entry.sparse_handle = CreateSparse(device, scheduler, sources, total);
-        if (entry.sparse_handle) {
-            entry.owners.reserve(sources.size());
-            for (const MultiRangeSource& source : sources) {
-                entry.owners.push_back(source.handle);
-            }
-        }
     }
     if (!entry.sparse_handle) {
         VkBufferUsageFlags flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -308,25 +279,7 @@ void MultiRangeBufferCache::MarkGathered(u64 key) {
 }
 
 void MultiRangeBufferCache::DropOwner(Scheduler& scheduler, VkBuffer owner) {
-    if (owner == VK_NULL_HANDLE) {
-        return;
-    }
-    for (auto it = entries.begin(); it != entries.end();) {
-        Entry& entry = it->second;
-        bool owned = false;
-        for (const VkBuffer handle : entry.owners) {
-            if (handle == owner) {
-                owned = true;
-                break;
-            }
-        }
-        if (!owned) {
-            ++it;
-            continue;
-        }
-        RetireEntry(scheduler, entry);
-        it = entries.erase(it);
-    }
+    DropMultiRangeOwner(entries, owner, [&](Entry& entry) { RetireEntry(scheduler, entry); });
 }
 
 void MultiRangeBufferCache::Invalidate(u64 key) {

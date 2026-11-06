@@ -951,7 +951,7 @@ struct Values {
     SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
 
     // WebService
-    Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
+    Setting<std::string> web_api_url{linkage, "", "web_api_url",
                                      Category::WebService};
     Setting<std::string> eden_username{linkage, "Eden", "eden_username",
                                        Category::WebService};

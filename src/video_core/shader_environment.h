@@ -23,6 +23,7 @@
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ampere/instruction.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/shader_cbuf_read.h"
 
 namespace Tegra {
 class Memorymanager;
@@ -96,7 +97,7 @@ public:
 
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 
-    void Serialize(std::ofstream& file) const;
+    void Serialize(std::ostream& file) const;
 
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
@@ -117,6 +118,12 @@ protected:
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                              bool via_header_index, u32 raw);
+
+    u32 RecordCbufRead(const ShaderCbufRead& read);
+    // Live translation owns its environment exclusively; serialization starts after translation.
+    std::array<ShaderCbufRead, 16> recent_cbuf_reads{};
+    size_t recent_cbuf_next{};
+    size_t recent_cbuf_count{};
 
     Tegra::MemoryManager* gpu_memory{};
     GPUVAddr program_base{};
@@ -218,7 +225,7 @@ public:
     FileEnvironment& operator=(const FileEnvironment&) = delete;
     FileEnvironment(const FileEnvironment&) = delete;
 
-    void Deserialize(std::ifstream& file);
+    void Deserialize(std::istream& file);
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 
@@ -253,7 +260,7 @@ public:
                                                                                u32 offset) override;
 
     [[nodiscard]] bool HasHLEMacroState() const override {
-        return cbuf_replacements.size() != 0;
+        return has_hle_engine_state;
     }
     bool HasNativeInstructions() const override;
 
@@ -274,6 +281,7 @@ private:
     u32 read_highest{};
     u32 initial_offset{};
     u32 viewport_transform_state = 1;
+    bool has_hle_engine_state{};
 };
 
 void SerializePipeline(std::span<const char> key, std::span<const GenericEnvironment* const> envs,

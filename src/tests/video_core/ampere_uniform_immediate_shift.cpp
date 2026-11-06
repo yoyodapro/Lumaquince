@@ -99,14 +99,14 @@ TEST_CASE("Ampere uniform immediate shifts allocate high uniform registers", "[v
     instruction.words[2] = (instruction.words[2] & ~255U) | 29U;
     const auto first = Shader::Ampere::LowerToMaxwellWith(std::array{instruction, Exit}, 0);
     REQUIRE_FALSE(first);
-    REQUIRE(first.high_uniform_registers == 2);
+    REQUIRE(first.high_uniform_registers == 4);
     const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
     INFO(lowered.error);
     REQUIRE(lowered);
-    REQUIRE(lowered.instructions[1] == 0x5c4800000d77fad6ULL);
+    REQUIRE(lowered.instructions[1] == 0x5c4800000d57fad4ULL);
     instruction.words[2] = (instruction.words[2] & ~255U) | 63U;
     const auto zero_shift = LowerToMaxwell(std::array{instruction, Exit});
     REQUIRE(zero_shift);
-    REQUIRE(zero_shift.instructions[1] == 0x5c4800000ff7fad6ULL);
+    REQUIRE(zero_shift.instructions[1] == 0x5c4800000ff7fad4ULL);
 }
 } // namespace

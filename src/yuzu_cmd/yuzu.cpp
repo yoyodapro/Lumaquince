@@ -342,7 +342,7 @@ static std::atomic_bool pack_nup_cancel{false};
 static std::atomic_bool unpack_nup_cancel{false};
 static std::atomic_bool edit_nup_cancel{false};
 
-// eden-cli --pack-nup <dump> [<out.nup>]; the output defaults to <dump>.nup next to the dump.
+// lumaquince-cli --pack-nup <dump> [<out.nup>]; the output defaults to <dump>.nup next to the dump.
 static bool PackNup(const std::string& source, const std::string& output) {
     const auto to_path = [](const std::string& utf8) {
         return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
@@ -383,7 +383,7 @@ static bool PackNup(const std::string& source, const std::string& output) {
     }
 }
 
-// eden-cli --unpack-nup <file.nup> [<out_dir>]; the output defaults to <name>/ next to the NUP.
+// lumaquince-cli --unpack-nup <file.nup> [<out_dir>]; the output defaults to <name>/ next to the NUP.
 static bool UnpackNup(const std::string& source, const std::string& output) {
     const auto to_path = [](const std::string& utf8) {
         return std::filesystem::path{std::u8string{utf8.begin(), utf8.end()}};
@@ -639,7 +639,7 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
         const u16 error_id = u16(load_result) - loader_id;
         LOG_CRITICAL(Frontend,
             "While attempting to load the ROM requested, an error occurred. Please "
-            "refer to the Eden wiki for more information or the Eden discord for "
+            "refer to the included documentation for more information and "
             "additional help.\n\nError Code: {:04X}-{:04X}\nError Description: {}",
             loader_id, error_id, Loader::ResultStatus(error_id));
         return SDL_APP_FAILURE;

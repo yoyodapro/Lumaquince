@@ -17,8 +17,9 @@ Line numbers refer to `feat/debug-mcp` at the time of writing.
   device: they can run programs and read files there, but cannot see the screen or press keys.
 - Game files, keys and firmware never leave that PC, and the server must not give a way to read
   them.
-- A normal run must not change: the server is off unless `EDEN_NX2_DEBUG_SERVER` is set, and
-  while it is off the only cost is one relaxed atomic load per presented frame.
+- A normal run keeps its defaults: the server is off unless `EDEN_NX2_DEBUG_SERVER` is set.
+  Present timing checks use one relaxed atomic load per presented frame; GPU split spin policy
+  uses one relaxed load per relevant wait, never per spin iteration.
 - No relaunch for a new question, and as few rebuilds as possible for a new tool.
 
 ## Architecture
@@ -32,6 +33,11 @@ agent ──stdio MCP──> tools/nx2/debug_mcp.py ──TCP 127.0.0.1, JSON li
 ```
 
 ### In-process server
+
+`split_spin_budgets` reads or updates the bounded GPU split spin policy for measured diagnostics.
+See [GPU split wait controls](gpu-split-waits.md#debug-spin-budget-measurement) for limits, reset,
+and measurement scope. It changes no completion predicate and persists no settings. Separate
+bounded startup parameters in `nx2_switches.txt` can retain a measured policy across launches.
 
 `src/core/debugger/nx2_debug_server.cpp` is the transport. It listens on a loopback TCP port
 with Boost.Asio, as the GDB stub does (`src/core/debugger/debugger.cpp:147`), and runs one
@@ -97,8 +103,10 @@ service ends the session first, which wakes every waiter, then stops the `io_con
 shutdown waits at most about 50 ms for a handler.
 
 Cost when unused: if `EDEN_NX2_DEBUG_SERVER` is unset, `MaybeStartService` returns at its first
-`getenv`. No thread, no socket, no log ring. The per-frame check is one relaxed atomic load. The
-runtime reject check in the lowering is one relaxed atomic load per lowered program. When the
+`getenv`. No thread, no socket, no log ring. The per-frame check is one relaxed atomic load,
+and each guest present checks one more relaxed flag: only a running server
+(`g_nx2_present_time_services`, counted by `Service`) makes it store a steady-clock timestamp in the 4096-entry ring
+`frame_times` reads. The runtime reject check in the lowering is one relaxed atomic load per lowered program. When the
 server is on but idle, its thread sleeps in `epoll`/IOCP.
 
 ## Safety
@@ -128,6 +136,7 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 | Tool | Today | With the server | Phase |
 |---|---|---|---|
 | `status` | Ask the owner what is on screen, read the log header | One call: title, program id, build, paused, presents, fps, renderer, rejected hashes | 1 |
+| `frame_times` | Frame trace and manual interval analysis | Guest-present interval statistics and VSync histogram over a timed window | 1 |
 | `screenshot` | Owner takes and sends a screenshot | PNG of the next presented frame, as MCP image content | 1 |
 | `log_tail`, `log_filter` | Relaunch with a new filter, owner sends the log | Read new lines since the last call, change the filter live | 1 |
 | `capture_frame` | Relaunch with `EDEN_NX2_FRAME_DUMP`, owner touches `capture.now`, agent copies the dump | Capture the next frame now, sampled inputs optional, get the manifest summary back; `capture_image` returns any pass PNG | 1 |
@@ -148,6 +157,18 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 `Common::g_build_fullname` and `g_scm_rev`, and `System::IsPaused`. It measures fps from
 `Core::g_nx2_present_count` (`src/core/core.cpp:78`) over a short window. It does not call
 `GetAndResetPerfStats`, which would reset the Qt status bar's counters.
+
+**`frame_times`** `{seconds?, refresh_hz?}` waits for `seconds` (default 5, > 0, at most 60),
+interruptible on shutdown like `status`. It measures intervals between guest presents inside
+that window, not display scanout or GPU execution time. `frames` counts those intervals;
+`mean_ms`, `fps` (1000 / mean), `p50_ms`, `p90_ms`, `p99_ms`, `min_ms`, `max_ms` describe them.
+Percentiles interpolate between sorted samples. `vsync_buckets` gives fractions (0 to 1) under
+keys `1`, `2`, `3`, `4+`, using boundaries 1.5, 2.5 and 3.5 refresh intervals (`refresh_hz`
+defaults to 60 and must be positive). `stutters` counts intervals strictly above twice the
+median. `intervals_ms` contains the last up to 120 intervals in chronological order, rounded
+to 0.1 ms. With fewer than two presents, statistics are zero and the interval list is empty.
+Only available samples from the 4096-timestamp ring are used; overflow sets `truncated: true`.
+For example: `{"method":"frame_times","params":{"seconds":5,"refresh_hz":60}}`.
 
 **`screenshot`** `{height?, save?, timeout_s?}`. It requests a 16:9 layout from
 `Layout::DefaultFrameLayout`, and the renderer blits the presented framebuffers into it. The
@@ -180,6 +201,20 @@ the manifest summary (`WriterLoop`, `vk_frame_dump.cpp:568`). The tool returns t
 frame and summary lines, counts per entry kind, the first entries, and the `frame_dump_index.py`
 command. With `index: true`, the adapter runs that command itself. The adapter-only
 `capture_image {directory, name}` returns one pass PNG as image content.
+
+Captures also write `kind: draw` manifest records for the first 16,384 configured draws, without
+additional GPU readbacks. `draw` is the zero-based counter shared with pass/image records; it is
+not a Vulkan/RenderDoc event ID, and one indirect draw request can contain multiple GPU draws.
+`shader_slots` preserves all six guest pipeline-key hashes in slot order, including zero slots
+and repeated hashes. Slots are vertex A, vertex B, tessellation control, tessellation evaluation,
+geometry and fragment; native task/mesh programs can occupy the vertex/tessellation slots. Do not
+infer a native program's execution stage from its slot alone. Unlike the legacy pass-level
+32-unique-hash list, this identifies each configured draw's complete shader key. The summary
+reports `draw_metadata_limit`, `draw_metadata_records`, `draw_metadata_dropped` and
+`draw_metadata_truncated` separately from image-budget truncation. Missing records after that
+limit are not evidence that a shader was unused. The image index ignores these non-image records.
+These records do not capture buffers or descriptor contents and cannot establish per-invocation
+texture-handle provenance; use an authorized local RenderDoc capture for those inputs.
 
 **`reject_shaders`** `{hashes?, reject?, timeout_s?}`. This is `EDEN_NX2_REJECT_HASH` at
 runtime: the same keys (native program key or shader hash) and the same effect. Pipeline

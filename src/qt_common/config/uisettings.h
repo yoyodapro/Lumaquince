@@ -138,7 +138,7 @@ struct Values {
                                       true,
                                       true};
 
-    Setting<bool> check_for_updates{linkage, true, "check_for_updates", Category::UiGeneral};
+    Setting<bool> check_for_updates{linkage, false, "check_for_updates", Category::UiGeneral};
 
     // Linux/MinGW may support (requires libdl support)
     SwitchableSetting<bool> enable_gamemode{linkage,

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -24,8 +25,12 @@ namespace VideoCommon {
 template <typename T, typename Id = u32>
 class DescriptorTable {
 public:
+    [[nodiscard]] static constexpr size_t CapacityForLimit(u32 limit) noexcept {
+        return std::bit_ceil(size_t{limit} + 1);
+    }
+
     [[nodiscard]] bool Synchronize(GPUVAddr gpu_addr, u32 limit) noexcept {
-        bool ret = !(current_gpu_addr == gpu_addr && current_limit == limit);
+        const bool ret = descriptors.empty() || current_gpu_addr != gpu_addr || current_limit != limit;
         if (ret) {
             Refresh(gpu_addr, limit);
         }
@@ -76,15 +81,16 @@ public:
     void Refresh(GPUVAddr gpu_addr, u32 limit) noexcept {
         current_gpu_addr = gpu_addr;
         current_limit = limit;
-        // Mario Brothership reallocates a lot of times, so use aggressive pre-alloc sizes
-        // std::vector<T> by default uses quadratic growth, but that isn't even enough to satisfy brothership
-        const size_t num_descriptors = ((limit + 0x80000) & (~0x7ffff)) + 1;
-        read_descriptors.resize(Common::DivCeil(num_descriptors, 64U));
+        // Geometric growth bounds spare storage for small tables. Keep initialized storage at
+        // its high-water mark so fluctuating limits do not reallocate or reconstruct entries.
+        const size_t num_descriptors = CapacityForLimit(limit);
+        if (descriptors.size() < num_descriptors) {
+            descriptors.resize(num_descriptors);
+            bound_ids.resize(num_descriptors, Id{0});
+            read_descriptors.resize(Common::DivCeil(num_descriptors, 64U));
+        }
         ClearReadDescriptors();
         invalidated = false;
-        //
-        descriptors.resize(num_descriptors);
-        bound_ids.resize(num_descriptors, Id{0});
     }
 
     std::vector<u64> read_descriptors;
@@ -96,7 +102,7 @@ public:
 
 private:
     void ClearReadDescriptors() noexcept {
-        // Reserved capacity is not addressable. A later limit increase clears its new range.
+        // Only the current limit is live. A later limit increase clears its newly exposed range.
         const size_t words = (std::min)(read_descriptors.size(), size_t{current_limit} / 64 + 1);
         std::fill_n(read_descriptors.begin(), words, u64{0});
         const size_t ids = (std::min)(bound_ids.size(), size_t{current_limit} + 1);

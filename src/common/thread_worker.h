@@ -58,20 +58,24 @@ public:
             }
             {
                 [[maybe_unused]] std::conditional_t<with_state, StateType, int> state{func()};
-                while (!stop_token.stop_requested()) {
+                while (true) {
                     Task task;
                     {
                         std::unique_lock lock{queue_mutex};
-                        if (requests.empty()) {
+                        if (requests.empty() && accepted_requests.empty()) {
                             wait_condition.notify_all();
                         }
-                        condition.wait(lock, stop_token,
-                                       [this] { return !requests.empty(); });
-                        if (stop_token.stop_requested()) {
+                        condition.wait(lock, stop_token, [this] {
+                            return !requests.empty() || !accepted_requests.empty();
+                        });
+                        // Ordinary cancelled captures keep their original lifetime: they stay
+                        // queued until the owner's thread destroys this worker pool.
+                        if (accepted_requests.empty() && stop_token.stop_requested()) {
                             break;
                         }
-                        task = std::move(requests.front());
-                        requests.pop();
+                        auto& queue = accepted_requests.empty() ? requests : accepted_requests;
+                        task = std::move(queue.front());
+                        queue.pop();
                     }
                     if constexpr (with_state) {
                         task(&state);
@@ -105,12 +109,32 @@ public:
         condition.notify_one();
     }
 
-    void WaitForRequests(std::stop_token stop_token = {}) {
-        std::stop_callback callback(stop_token, [this] {
-            for (auto& thread : threads) {
-                thread.request_stop();
+    /// Admit work only into an available slot, guaranteeing execution even during cancellation.
+    bool TryQueueWork(Task work) {
+        {
+            std::unique_lock lock{queue_mutex};
+            if (stopping || work_scheduled - work_done >= workers_queued) {
+                return false;
             }
-        });
+            // Keep these bounded jobs separate, so stopping never scans or destroys the
+            // potentially unbounded ordinary queue to find work a caller is waiting for.
+            accepted_requests.emplace(std::move(work));
+            ++work_scheduled;
+        }
+        condition.notify_one();
+        return true;
+    }
+
+    void RequestStop() {
+        std::unique_lock lock{queue_mutex};
+        stopping = true;
+        for (auto& thread : threads) {
+            thread.request_stop();
+        }
+    }
+
+    void WaitForRequests(std::stop_token stop_token = {}) {
+        std::stop_callback callback(stop_token, [this] { RequestStop(); });
         std::unique_lock lock{queue_mutex};
         wait_condition.wait(lock, [this] {
             return workers_stopped >= workers_queued || work_done >= work_scheduled;
@@ -119,6 +143,8 @@ public:
 
 private:
     std::queue<Task> requests;
+    std::queue<Task> accepted_requests;
+    bool stopping{};
     std::mutex queue_mutex;
     std::condition_variable_any condition;
     std::condition_variable wait_condition;

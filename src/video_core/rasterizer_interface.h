@@ -91,6 +91,11 @@ public:
     /// Release all pending fences.
     virtual void ReleaseFences(bool force = true) = 0;
 
+    /// Publishes query reports in the region before a CPU-side GPU command reads them.
+    virtual void FlushQueryResults(DAddr addr, u64 size) {
+        FlushRegion(addr, size, VideoCommon::CacheType::QueryCache);
+    }
+
     /// Notify rasterizer that all caches should be flushed to Switch memory
     virtual void FlushAll() = 0;
 

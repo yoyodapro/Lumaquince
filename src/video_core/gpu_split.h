@@ -5,12 +5,14 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <thread>
 #include <type_traits>
 
+#include "common/bounded_spin_wait.h"
 #include "common/common_types.h"
 
 namespace Core {
@@ -59,6 +61,17 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
 // EDEN_NX2_SPLIT=1 keeps the macros on the back; EDEN_NX2_SPLIT=0 runs everything on one thread.
 class GpuSplit {
 public:
+    struct SpinBudgets {
+        u32 front{16384};
+        u32 capacity{4096};
+        u32 back{8192};
+        bool operator==(const SpinBudgets&) const = default;
+    };
+
+    /// Spin policy controls; they do not publish work or satisfy any wait predicate.
+    [[nodiscard]] SpinBudgets GetSpinBudgets() const;
+    bool SetSpinBudgets(SpinBudgets budgets);
+
     static GpuSplit& Get() {
         return instance;
     }
@@ -76,7 +89,16 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread;
     }
-    /// Called on the back before it sleeps waiting for work (the rasterizer submits deferred work).
+    /// Marks the calling thread as the GPU thread (the front, or the only one without the split).
+    static void MarkGpuThread() {
+        on_gpu_thread = true;
+    }
+    /// Whether the calling thread owns the Vulkan scheduler: the back while it runs, else the
+    /// GPU thread. Other threads (CPU cores, services) must not record or submit work.
+    [[nodiscard]] static bool OwnsScheduler() {
+        return Get().BackRunning() ? on_back_thread : on_gpu_thread;
+    }
+    /// Called on the back before it sleeps or exits (the rasterizer submits deferred work).
     void SetIdleHook(void (*hook)(void*), void* argument) {
         idle_hook = hook;
         idle_argument = argument;
@@ -176,12 +198,15 @@ public:
     bool WaitForSync();
 
 private:
+    friend struct GpuSplitTestAccess;
+
     enum class Kind : u64 {
         Wrap,   ///< The rest of the ring is unused: continue at its start
         Engine, ///< The engine the next methods go to: word 1
         Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
         Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        Function, ///< An owned std::function follows the header, including when cancelled
     };
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
@@ -191,10 +216,32 @@ private:
     static constexpr size_t RingMask = RingWords - 1;
     static constexpr u32 MaxMultiWords = 8192;
     static constexpr size_t PublishEvery = 256;
+    using Function = std::function<void()>;
+    static constexpr size_t FunctionPadding =
+        alignof(Function) > alignof(u64) ? alignof(Function) - alignof(u64) : 0;
+    static constexpr size_t FunctionWords =
+        1 + (sizeof(Function) + FunctionPadding + sizeof(u64) - 1) / sizeof(u64);
+
+    static Function* FunctionAddress(u64* entry) {
+        void* payload = reinterpret_cast<std::byte*>(entry) + sizeof(u64);
+        size_t space = (FunctionWords - 1) * sizeof(u64);
+        return static_cast<Function*>(std::align(alignof(Function), sizeof(Function), payload, space));
+    }
 
     template <typename Func>
     static void CallThunk(const u64* payload) {
         (*reinterpret_cast<const Func*>(payload))();
+    }
+
+    u64* EntryAt(size_t index) {
+        return reinterpret_cast<u64*>(ring.get() + index * sizeof(u64));
+    }
+
+    u64* PrepareEntry(size_t index, size_t words) {
+        // Byte storage can host both ordinary word arrays and nontrivial owned callbacks.
+        // Recreate it when recycling a slot to begin the next entry's object lifetimes.
+        return reinterpret_cast<u64*>(
+            ::new (ring.get() + index * sizeof(u64)) std::byte[words * sizeof(u64)]);
     }
 
     /// Room for an entry of `words` at the write position (never across the ring's end).
@@ -202,7 +249,7 @@ private:
         const size_t index = write_position & RingMask;
         if (index + words <= RingWords && write_position + words - consumed_cache <= RingWords)
             [[likely]] {
-            return &ring[index];
+            return PrepareEntry(index, words);
         }
         return ReserveSlow(words);
     }
@@ -220,15 +267,21 @@ private:
         }
     }
     void SwitchEngine(Tegra::Engines::EngineInterface* engine);
-    bool WaitFor(u64 target, DrainSite site);
+    bool WaitFor(u64 target, DrainSite site, u32 spins);
+
+    void NotifyFront() {
+        front_progress.fetch_add(1, std::memory_order_release);
+        front_progress.notify_one();
+    }
 
     void BackLoop(std::stop_token stop_token);
-    size_t Execute(const u64* entry);
+    size_t Execute(u64* entry);
+    static size_t Discard(u64* entry);
 
     Core::System* system{};
     bool active{};
     bool front_macros{};
-    std::unique_ptr<u64[]> ring;
+    std::unique_ptr<std::byte[]> ring;
 
     // Front side.
     u64 write_position{};
@@ -243,12 +296,21 @@ private:
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
 
+    /// Whether the back is done with the Vulkan scheduler until it gets more work: set after its
+    /// idle hook ran, cleared before it executes entries.
+    [[nodiscard]] bool BackQuiet() const {
+        return back_quiet.load(std::memory_order_acquire) ||
+               !back_running.load(std::memory_order_acquire);
+    }
+
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
+    static inline thread_local bool on_gpu_thread{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
+    std::atomic<bool> back_quiet{true};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are
     // always touched together by both threads, so they share a block.
@@ -258,7 +320,10 @@ private:
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
+    alignas(128) std::atomic<u64> front_progress{};
     std::jthread back_thread;
+    // One snapshot for all three budgets. Relaxed ordering is sufficient for policy, not work.
+    std::atomic<u64> spin_budgets{u64{16384} | (u64{4096} << 16) | (u64{8192} << 32)};
 };
 
 } // namespace VideoCommon

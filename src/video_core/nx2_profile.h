@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 
@@ -83,10 +84,27 @@ inline u64 Now() {
     return static_cast<u64>(Common::g_wall_clock.GetTimeNS().count());
 }
 
+/// Amounts counted on the GPU thread, logged per second with the zones.
+enum class Counter : u32 {
+    DownloadBytes,  ///< Fence download staging bytes, including 64-byte copy alignment
+    DownloadCopies, ///< Buffer ranges copied back
+    DmaReadBytes,   ///< Guest memory the native MME read with DMA
+    DownloadBytesOnDmaPages, ///< Of DownloadBytes: on pages the MME has DMA-read
+    MethodWrites,   ///< 3D register writes (Maxwell3D::CallMethod below the macro range)
+    SameValueWrites, ///< Of MethodWrites: the register already held the value
+    AcquireChecks,  ///< Semaphore acquires evaluated
+    AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
+    DownloadPageCandidateBytes, ///< Aligned bytes the old page-expanded selection would copy
+    DownloadPageCandidateCopies,
+    DownloadUniqueBytes, ///< Exact union of selected bytes within each fence batch
+    DownloadUniqueRanges,
+    Count,
+};
+
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, static_cast<size_t>(Counter::Count)> counters{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -129,23 +147,22 @@ private:
     u64 parent_child_ns{};
 };
 
-/// Amounts counted on the GPU thread, logged per second with the zones.
-enum class Counter : u32 {
-    DownloadBytes,  ///< Buffer data copied back from the host GPU at fences
-    DownloadCopies, ///< Buffer ranges copied back
-    DmaReadBytes,   ///< Guest memory the native MME read with DMA
-    DownloadBytesOnDmaPages, ///< Of DownloadBytes: on pages the MME has DMA-read
-    MethodWrites,   ///< 3D register writes (Maxwell3D::CallMethod below the macro range)
-    SameValueWrites, ///< Of MethodWrites: the register already held the value
-    AcquireChecks,  ///< Semaphore acquires evaluated
-    AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
-};
-
-/// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
-/// while profiling): which buffer downloads anything on the GPU thread reads back.
+/// Device pages (4 KiB) the native MME has DMA-read since start (filled only while profiling):
+/// which buffer downloads anything on the GPU thread reads back. With the GPU thread split the
+/// front reads and the back downloads: take DmaReadPagesMutex around every use.
 inline std::unordered_set<u64>& DmaReadPages() {
     static std::unordered_set<u64> pages;
     return pages;
+}
+
+inline std::mutex& DmaReadPagesMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+inline void AddDmaReadPage(u64 page) {
+    std::scoped_lock lock{DmaReadPagesMutex()};
+    DmaReadPages().insert(page);
 }
 
 inline void Add(Counter counter, u64 amount) {
@@ -204,6 +221,15 @@ inline void Report(const char* thread_name = "GPU thread") {
                         static_cast<double>(data.counters[1]) * 1e9 / window,
                         static_cast<double>(data.counters[3]) * 1e9 / 1024.0 / window,
                         static_cast<double>(data.counters[2]) * 1e9 / 1024.0 / window);
+    const auto rate = [&](Counter counter) {
+        return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
+    };
+    line += fmt::format(" | async page candidates {:.0f} KiB in {:.0f} copies"
+                        " | async selected unique {:.0f} KiB in {:.0f} ranges",
+                        rate(Counter::DownloadPageCandidateBytes) / 1024.0,
+                        rate(Counter::DownloadPageCandidateCopies),
+                        rate(Counter::DownloadUniqueBytes) / 1024.0,
+                        rate(Counter::DownloadUniqueRanges));
     line += fmt::format(" | 3D register writes {:.0f} ({:.0f} same value)",
                         static_cast<double>(data.counters[4]) * 1e9 / window,
                         static_cast<double>(data.counters[5]) * 1e9 / window);

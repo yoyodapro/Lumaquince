@@ -35,6 +35,10 @@ class FakeEmulator:
         method = request["method"]
         if method == "status":
             return {"result": {"title": "Test", "presents": 3}}
+        if method == "frame_times":
+            return {"result": {"frames": 2, "intervals_ms": [16.7, 33.3], "truncated": False}}
+        if method == "split_spin_budgets":
+            return {"result": {"current": request["params"]}}
         if method == "screenshot":
             return {"result": {"width": 1280, "height": 720, "png_base64": PNG}}
         if method == "capture_frame":
@@ -90,9 +94,25 @@ class AdapterTest(unittest.TestCase):
         self.assertIsNone(self.adapter.handle({"method": "notifications/initialized"}))
         names = [tool["name"] for tool in self.adapter.handle({"id": 2, "method": "tools/list"})
                  ["result"]["tools"]]
-        self.assertEqual(names, ["status", "screenshot", "log_tail", "log_filter", "capture_frame",
+        self.assertEqual(names, ["split_spin_budgets", "status", "frame_times", "screenshot", "log_tail", "log_filter", "capture_frame",
                                  "capture_image", "reject_shaders"])
         self.assertEqual(self.adapter.handle({"id": 3, "method": "bogus"})["error"]["code"], -32601)
+
+    def test_frame_times_is_forwarded(self):
+        arguments = {"seconds": 0.5, "refresh_hz": 59.94}
+        result = self.call("frame_times", arguments)
+        self.assertFalse(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"]),
+                         {"frames": 2, "intervals_ms": [16.7, 33.3], "truncated": False})
+        self.assertEqual(self.fake.requests[-1]["params"], arguments)
+
+    def test_split_spin_budget_requests_are_forwarded_without_coercion(self):
+        for arguments in ({}, {"front": 0, "capacity": 64, "back": 8192}, {"reset": True},
+                          {"front": 1.5}, {"back": -1}):
+            result = self.call("split_spin_budgets", arguments)
+            self.assertFalse(result["isError"])
+            self.assertEqual(self.fake.requests[-1]["params"], arguments)
+            self.assertEqual(json.loads(result["content"][0]["text"])["current"], arguments)
 
     def test_status_is_forwarded(self):
         result = self.call("status", {"fps_window_ms": 0})

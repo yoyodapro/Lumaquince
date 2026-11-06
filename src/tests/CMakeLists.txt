@@ -8,6 +8,13 @@ add_executable(tests
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
     video_core/gpu_timestamp.cpp
+    video_core/gpu_split_lifetime.cpp
+    video_core/maxwell_front_draw_state.cpp
+    video_core/usage_tracker.cpp
+    video_core/nx2_gpu_written_pages.cpp
+    video_core/continuous_range_cache.cpp
+    video_core/compatible_formats.cpp
+    video_core/gpu_mapping_remap.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_debug_server.cpp
@@ -26,6 +33,8 @@ add_executable(tests
     core/gpu_dirty_memory.cpp
     core/memory_acquire.cpp
     core/builtin_patches.cpp
+    core/builtin_adaptive_timing.cpp
+    core/adaptive_timing_fixture.h
     core/system_test_context.h
     video_core/ampere_branch_modifiers.cpp
     video_core/ampere_fast_fusion_logged.cpp
@@ -48,6 +57,7 @@ add_executable(tests
     video_core/maxwell_permute_lod.cpp
     video_core/submission_policy.cpp
     video_core/framebuffer_clear_layers.cpp
+    video_core/clear_plan.cpp
     video_core/fire_emblem_upscale.cpp
     video_core/dlss_contract.cpp
     video_core/ampere_fast_fusion.cpp
@@ -55,6 +65,7 @@ add_executable(tests
     video_core/ampere_trap_guards.cpp
     video_core/async_draw_policy.cpp
     video_core/multi_range_refresh.cpp
+    video_core/multi_range_lifetime.cpp
     video_core/command_fetch_order.cpp
     video_core/command_snapshot_suspensions.cpp
     video_core/pending_maps.cpp
@@ -75,6 +86,7 @@ add_executable(tests
     video_core/ampere_tennis_i2f.cpp
     video_core/ampere_tennis_tessellation.cpp
     video_core/pipeline_cache_files.cpp
+    video_core/pipeline_preload.cpp
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
     video_core/gpu_command_safety.cpp
@@ -83,12 +95,16 @@ add_executable(tests
     video_core/ampere_matrix.cpp
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
+    video_core/spirv_atomic_cas.cpp
+    video_core/spirv_mesh_topology.cpp
     common/bit_field.cpp
+    common/bounded_spin_wait.cpp
     common/cityhash.cpp
     common/container_hash.cpp
     common/event.cpp
     common/fibers.cpp
     common/game_presets.cpp
+    common/config_reload.cpp
     common/host_memory.cpp
     common/page_table.cpp
     common/param_package.cpp
@@ -114,6 +130,7 @@ add_executable(tests
     video_core/nx2_gpu_mapping.cpp
     video_core/vertex_repack.cpp
     video_core/ampere_lowering.cpp
+    video_core/ampere_register_pressure.cpp
     video_core/ampere_geometry.cpp
     video_core/ampere_i2f.cpp
     video_core/ampere_returns.cpp
@@ -123,8 +140,23 @@ add_executable(tests
     video_core/ampere_bindless_surfaces.cpp
     video_core/native_macro_fifo.cpp
     video_core/uniform_stream_reuse.cpp
+    video_core/index_binding_state.cpp
+    video_core/storage_binding_cache.cpp
+    video_core/draw_preparation.cpp
+    video_core/command_writer.cpp
+    video_core/frame_dump_draw_metadata.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
+    video_core/descriptor_table_capacity.cpp
+    video_core/query_copy_batches.cpp
+    video_core/query_bank.cpp
+    video_core/query_publication.cpp
+    video_core/texture_threshold_logging.cpp
+    video_core/shader_environment_serialization.cpp
+    video_core/shader_object_pool.cpp
+    video_core/unswizzle_workers.cpp
+    video_core/unswizzle_uploads.cpp
+    video_core/shader_cbuf_read.cpp
     video_core/global_address_tracking.cpp
     video_core/nvn_storage_descriptor.cpp
     video_core/ampere_f2i.cpp
@@ -137,7 +169,7 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
-target_link_libraries(tests PRIVATE common core audio_core input_common video_core)
+target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 if (TARGET dynarmic::dynarmic)

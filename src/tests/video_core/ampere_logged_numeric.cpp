@@ -96,15 +96,32 @@ u32 EvaluateShift(IR::Value value) {
                                          std::bit_cast<float>(arg(2))));
     case IR::Opcode::BitwiseAnd32:
         return arg(0) & arg(1);
+    case IR::Opcode::BitwiseOr32:
+        return arg(0) | arg(1);
+    case IR::Opcode::IAdd32:
+        return arg(0) + arg(1);
+    case IR::Opcode::INeg32:
+        return 0U - arg(0);
     case IR::Opcode::ULessThan:
         return arg(0) < arg(1);
     case IR::Opcode::SelectU32:
         return arg(0) ? arg(1) : arg(2);
-    case IR::Opcode::ShiftLeftLogical32: {
+    case IR::Opcode::ShiftLeftLogical32:
+    case IR::Opcode::ShiftRightLogical32: {
         const u32 shift = arg(1);
         if (shift >= 32)
             throw std::domain_error("Unmasked out-of-range shift reaches the result");
-        return arg(0) << shift;
+        return inst.GetOpcode() == IR::Opcode::ShiftLeftLogical32 ? arg(0) << shift
+                                                                : arg(0) >> shift;
+    }
+    case IR::Opcode::BitFieldInsert: {
+        const u32 offset = arg(2), count = arg(3);
+        if (offset > 32 || count > 32 - offset)
+            throw std::domain_error("Out-of-range bitfield reaches the result");
+        if (count == 0)
+            return arg(0);
+        const u32 mask = static_cast<u32>(((u64{1} << count) - 1) << offset);
+        return (arg(0) & ~mask) | ((arg(1) << offset) & mask);
     }
     default:
         throw std::logic_error(std::string{IR::NameOf(inst.GetOpcode())});
@@ -457,4 +474,67 @@ TEST_CASE("Ocarina mesh attribute stores read shadowed high registers",
     const u32 data = static_cast<u32>(*pseudo & 0xff);
     CHECK(data < 216);
     CHECK(std::find(begin, pseudo, Shader::Ampere::NativeRegisterCopy(0, data, 1, 240)) != pseudo);
+}
+
+TEST_CASE("Logged Ocarina shadowed integer arithmetic retains numeric results",
+          "[video_core][ampere][logged_numeric][oot]") {
+    const Instruction marker{{0x0000fc02, 0, 0, 0}};
+    const auto initialize = [](std::vector<u64>& code, u32 reg, u32 value, bool uniform = false) {
+        code.push_back(0x0100000000070000ULL | (15ULL << 12) | (u64{value} << 20));
+        code.push_back(Shader::Ampere::NativeRegisterCopy(!uniform && reg >= 216 ? 1 : 0,
+                                                       reg, 0, 0));
+    };
+    const auto finish = [](std::vector<u64> code, const Instruction& instruction,
+                           const Shader::Ampere::LoweredProgram& lowered, u32 expected) {
+        code.insert(code.end(), lowered.instructions.begin(), lowered.instructions.end() - 1);
+        const u32 destination = instruction.Bits(16, 8);
+        code.push_back(Shader::Ampere::NativeRegisterCopy(0, 0, destination >= 216 ? 1 : 0,
+                                                       destination));
+        code.push_back(Store(0));
+        code.push_back(lowered.instructions.back());
+        TranslateAndEmit(code, expected);
+    };
+    for (const Instruction instruction : {
+             Instruction{{0x1de57c24, 0x0000000a, 0x0f8e02ff, 0x000fe200}},
+             Instruction{{0x31e17c24, 0x0000000a, 0x0f8e02ff, 0x000fe200}},
+         }) {
+        const auto lowered = LowerToMaxwell(std::array{marker, instruction, Exit});
+        REQUIRE(lowered);
+        for (const u32 value : {0U, 1U, 0x10203040U, 0xffffffffU}) {
+            std::vector<u64> code;
+            initialize(code, instruction.Bits(24, 8), value);
+            initialize(code, 226, 0x113, true); // UR10
+            finish(std::move(code), instruction, lowered, value * 0x113U);
+        }
+    }
+    const Instruction addend{{0x1de57e24, 0x0000000a, 0x0f8e02ef, 0x000fe200}};
+    const auto addend_lowered = LowerToMaxwell(std::array{addend, Exit});
+    REQUIRE(addend_lowered);
+    for (const u32 value : {0U, 1U, 0x10203040U, 0xffffffffU}) {
+        std::vector<u64> code;
+        initialize(code, 29, value);
+        initialize(code, 239, 0xfedcba98);
+        initialize(code, 226, 0x113, true);
+        finish(std::move(code), addend, addend_lowered, value * 0xfedcba98U + 0x113U);
+    }
+    const Instruction wide{{0xf0077219, 0x0000001b, 0x000012ef, 0x000fe400}};
+    const Instruction alias{{0xffe47219, 0x000000e4, 0x00011e19, 0x000fe400}};
+    const Instruction uniform{{0xffe47c19, 0x0000000a, 0x08011e19, 0x000fe400}};
+    for (const auto instruction : {wide, alias, uniform}) {
+        const bool uniform_shift = instruction.Bits(0, 12) == 0xc19;
+        const auto lowered = uniform_shift ? LowerToMaxwell(std::array{instruction, Exit})
+                                           : LowerToMaxwell(std::array{marker, instruction, Exit});
+        REQUIRE(lowered);
+        for (const u32 shift : {0U, 1U, 7U, 31U, 32U, 45U, 63U}) {
+            std::vector<u64> code;
+            constexpr u32 low = 0x89abcdef, high = 0x76543210;
+            const bool is_wide = instruction.words[0] == wide.words[0];
+            if (is_wide) initialize(code, 240, low);
+            initialize(code, is_wide ? 239 : 25, high);
+            initialize(code, uniform_shift ? 226 : instruction.Bits(32, 8), shift, uniform_shift);
+            const u32 expected = is_wide ? static_cast<u32>(((u64{high} << 32) | low) >> shift)
+                                        : high >> (shift & 31);
+            finish(std::move(code), instruction, lowered, expected);
+        }
+    }
 }

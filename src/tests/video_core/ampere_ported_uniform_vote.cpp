@@ -75,8 +75,8 @@ TEST_CASE("Ampere uniform votes reach UR28 to UR62 through the high uniform mirr
         const auto lowered = LowerToMaxwell(std::array{vote, Exit});
         INFO(lowered.error);
         REQUIRE(lowered);
-        // A program whose highest uniform is URn mirrors (n - 26) & ~1 registers below R216.
-        const u32 high_uniforms = (target - 26) & ~1U;
+        // Uniform mirrors reserve complete quartets so guest register shadows remain aligned.
+        const u32 high_uniforms = (target - 24) & ~3U;
         REQUIRE(lowered.instructions.size() == 2);
         REQUIRE(lowered.instructions[0] == Vote(216 - high_uniforms + target - 28, 7, 7, 1));
     }
@@ -89,12 +89,14 @@ TEST_CASE("Ampere uniform votes reach UR28 to UR62 through the high uniform mirr
     REQUIRE(lowered.instructions.size() == 3);
     REQUIRE(lowered.instructions[0] == Vote(214, 7, 7, 1));
     REQUIRE(lowered.instructions[1] == Vote(180, 7, 7, 1));
-    // The mirrors are reserved: a native register the high bank shadows is rejected.
+    // A guest GPR overlapping those mirrors is preserved through its shadow bank.
     const auto shadowed = LowerToMaxwell(std::array{
         Instruction{{0x00d67802, 0x3f800000, 0x00000f00, 0x000fe400}},
         Instruction{{0x001c7886, 0, 0x038e0100, 0x000fe400}}, Exit});
-    REQUIRE_FALSE(shadowed);
-    REQUIRE(shadowed.error == "native program uses lowering scratch registers");
+    REQUIRE(shadowed);
+    REQUIRE(std::find(shadowed.instructions.begin(), shadowed.instructions.end(),
+                      Shader::Ampere::NativeRegisterCopy(1, 214, 0, 210)) !=
+            shadowed.instructions.end());
 }
 
 TEST_CASE("Ampere uniform votes keep the source predicate and its negation",

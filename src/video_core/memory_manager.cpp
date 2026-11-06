@@ -14,6 +14,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "memory_manager.h"
+#include "video_core/continuous_range_cache.h"
 #include "video_core/guest_memory.h"
 #include "video_core/nx2.h"
 #include "video_core/host1x/host1x.h"
@@ -135,7 +136,12 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
         const GPUVAddr current_gpu_addr = gpu_addr + offset;
         [[maybe_unused]] const auto current_entry_type = GetEntry(current_gpu_addr, false);
         SetEntry(current_gpu_addr, entry_type, false);
-        if (current_entry_type != entry_type) {
+        const auto index = PageEntryIndex(current_gpu_addr, false);
+        const u32 sub_value = static_cast<u32>((dev_addr + offset) >> cpu_page_bits);
+        const bool remapped = entry_type == EntryType::Mapped &&
+                              current_entry_type == EntryType::Mapped &&
+                              page_table[index] != sub_value;
+        if (current_entry_type != entry_type || remapped) {
             if (modified_size == 0) {
                 modified_start = current_gpu_addr;
             }
@@ -144,9 +150,6 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
             flush_modified();
         }
         if (entry_type == EntryType::Mapped) {
-            const DAddr current_dev_addr = dev_addr + offset;
-            const auto index = PageEntryIndex(current_gpu_addr, false);
-            const u32 sub_value = static_cast<u32>(current_dev_addr >> cpu_page_bits);
             page_table[index] = sub_value;
         }
         remaining_size -= page_size;
@@ -174,7 +177,13 @@ GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr
         const GPUVAddr current_gpu_addr = gpu_addr + offset;
         [[maybe_unused]] const auto current_entry_type = GetEntry(current_gpu_addr, true);
         SetEntry(current_gpu_addr, entry_type, true);
-        if (current_entry_type != entry_type) {
+        const DAddr current_dev_addr = dev_addr + offset;
+        const auto index = PageEntryIndex(current_gpu_addr, true);
+        const u32 sub_value = static_cast<u32>(current_dev_addr >> cpu_page_bits);
+        const bool remapped = entry_type == EntryType::Mapped &&
+                              current_entry_type == EntryType::Mapped &&
+                              big_page_table_dev[index] != sub_value;
+        if (current_entry_type != entry_type || remapped) {
             if (modified_size == 0) {
                 modified_start = current_gpu_addr;
             }
@@ -183,9 +192,6 @@ GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr
             flush_modified();
         }
         if (entry_type == EntryType::Mapped) {
-            const DAddr current_dev_addr = dev_addr + offset;
-            const auto index = PageEntryIndex(current_gpu_addr, true);
-            const u32 sub_value = static_cast<u32>(current_dev_addr >> cpu_page_bits);
             big_page_table_dev.Set(index, sub_value);
             const bool is_continuous = ([&] {
                 uintptr_t base_ptr{
@@ -608,26 +614,13 @@ bool MemoryManager::IsMemoryDirty(GPUVAddr gpu_addr, size_t size,
 }
 
 size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
-    // Native storage buffers ask this for up to 8 MiB on each bind, ~70,000 times a second in
-    // title 1's forest (17% of the GPU thread walking pages): keep answers per thread until the
-    // page table changes.
-    struct Entry {
-        size_t owner;
-        GPUVAddr gpu_addr;
-        size_t size;
-        u64 serial;
-        size_t result;
-    };
-    thread_local std::array<Entry, 64> cache{};
+    // Share a bounded run between bindings within a page, retaining global map invalidation.
+    thread_local VideoCommon::ContinuousRangeCache cache;
     const u64 serial = map_serial.load(std::memory_order_acquire);
-    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 58];
-    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
-        entry.serial == serial) {
-        return entry.result;
-    }
-    const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
-    entry = {unique_identifier + 1, gpu_addr, size, serial, result};
-    return result;
+    return cache.Get(unique_identifier + 1, serial, gpu_addr, size, page_bits,
+                     [this](GPUVAddr address, size_t length) {
+                         return MaxContinuousRangeUncached(address, length);
+                     });
 }
 
 size_t MemoryManager::MaxContinuousRangeUncached(GPUVAddr gpu_addr, size_t size) const {

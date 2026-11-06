@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <memory>
 #include <stdexcept>
 #include "common/container/unordered_map.h"
 #include <tuple>
 #include <vector>
 #include <optional>
+#include <random>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/common_types.h"
+#include "video_core/buffer_cache/async_download_ranges.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "core/device_memory.h"
 #include "core/memory.h"
@@ -636,4 +639,195 @@ TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
     ranges.emplace_back(Core::Memory::YUZU_PAGESIZE, Core::Memory::YUZU_PAGESIZE);
     manager.UpdatePagesCachedBatch(ranges, 1);
     SUCCEED("UpdatePagesCachedBatch executed without error");
+}
+
+TEST_CASE("MemoryTracker: async downloads keep exact queued spans", "[video_core][async_download]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    tracker.UnmarkRegionAsCpuModified(c, PAGE);
+    tracker.MarkRegionAsGpuModified(c, PAGE);
+    Common::RangeSet<DAddr> dirty;
+    Common::RangeSet<DAddr> queued;
+    dirty.Add(c + 16, 8);
+    dirty.Add(c + 128, 16);
+    dirty.Add(c + 256, 32); // Dirty neighbor not selected by the fence policy.
+    queued.Add(c + 16, 8);
+    queued.Add(c + 128, 16);
+    std::vector<Range> downloads;
+    VideoCommon::AsyncDownloadCandidates candidates;
+    queued.ForEach([&](DAddr start, DAddr end) {
+        VideoCommon::ForEachAsyncDownloadRange(
+            tracker, dirty, start, end - start,
+            [&](DAddr lower, DAddr upper) { downloads.emplace_back(lower, upper); }, &candidates);
+    });
+    REQUIRE(downloads == std::vector<Range>{{c + 16, c + 24}, {c + 128, c + 144}});
+    // The real tracker expands each query to its page: the previous selection copied all
+    // three dirty spans twice, including a neighbor the fence never requested.
+    REQUIRE(candidates.copies == 6);
+    REQUIRE(candidates.aligned_bytes == 6 * 64);
+    REQUIRE(tracker.IsRegionGpuModified(c, PAGE));
+    REQUIRE(dirty.Intersects(c + 256, 32));
+}
+
+TEST_CASE("MemoryTracker: async downloads retain disjoint committed epochs", "[video_core][async_download]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    tracker.UnmarkRegionAsCpuModified(c, PAGE);
+    tracker.MarkRegionAsGpuModified(c, PAGE);
+    Common::RangeSet<DAddr> dirty;
+    Common::RangeSet<DAddr> older;
+    Common::RangeSet<DAddr> newer;
+    dirty.Add(c + 32, 256);
+    older.Add(c + 32, 256);
+    newer.Add(c + 96, 64);
+    // CommitAsyncFlushesHigh removes newer writes from older committed intervals.
+    newer.ForEach([&](DAddr start, DAddr end) { older.Subtract(start, end - start); });
+    std::vector<Range> downloads;
+    for (const auto* epoch : {&older, &newer}) {
+        epoch->ForEach([&](DAddr start, DAddr end) {
+            VideoCommon::ForEachAsyncDownloadRange(
+                tracker, dirty, start, end - start,
+                [&](DAddr lower, DAddr upper) { downloads.emplace_back(lower, upper); });
+        });
+    }
+    REQUIRE(downloads == std::vector<Range>{{c + 32, c + 96}, {c + 160, c + 288},
+                                           {c + 96, c + 160}});
+}
+
+TEST_CASE("MemoryTracker: async downloads exclude CPU-written holes", "[video_core][async_download]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    tracker.UnmarkRegionAsCpuModified(c, PAGE * 3);
+    tracker.MarkRegionAsGpuModified(c, PAGE * 3);
+    Common::RangeSet<DAddr> dirty;
+    dirty.Add(c, PAGE * 3);
+    // A byte-granular CPU write removes exact GPU dirtiness; a cached page write also
+    // removes that page from the tracker's downloadable pages when collected.
+    dirty.Subtract(c + 64, 32);
+    tracker.CachedCpuWrite(c + PAGE, PAGE);
+    tracker.FlushCachedWrites();
+    dirty.Subtract(c + PAGE, PAGE);
+    std::vector<Range> downloads;
+    VideoCommon::ForEachAsyncDownloadRange(
+        tracker, dirty, c + 32, PAGE * 2,
+        [&](DAddr lower, DAddr upper) { downloads.emplace_back(lower, upper); });
+    REQUIRE(downloads == std::vector<Range>{{c + 32, c + 64}, {c + 96, c + PAGE},
+                                           {c + PAGE * 2, c + PAGE * 2 + 32}});
+    REQUIRE(tracker.IsRegionGpuModified(c, PAGE));
+    REQUIRE(!tracker.IsRegionGpuModified(c + PAGE, PAGE));
+    REQUIRE(tracker.IsRegionGpuModified(c + PAGE * 2, PAGE));
+}
+
+TEST_CASE("MemoryTracker: async downloads respect live buffer boundaries", "[video_core][async_download]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    tracker.UnmarkRegionAsCpuModified(c, PAGE * 2);
+    tracker.MarkRegionAsGpuModified(c, PAGE * 2);
+    Common::RangeSet<DAddr> dirty;
+    dirty.Add(c, PAGE * 2);
+    const DAddr request_start = c + PAGE - 16;
+    const DAddr request_end = c + PAGE + 32;
+    const std::array<Range, 2> buffers{{{c, c + PAGE}, {c + PAGE, c + PAGE * 2}}};
+    std::vector<Range> downloads;
+    for (const auto& [buffer_start, buffer_end] : buffers) {
+        const DAddr start = (std::max)(buffer_start, request_start);
+        const DAddr end = (std::min)(buffer_end, request_end);
+        VideoCommon::ForEachAsyncDownloadRange(
+            tracker, dirty, start, end - start,
+            [&](DAddr lower, DAddr upper) { downloads.emplace_back(lower, upper); });
+    }
+    REQUIRE(downloads == std::vector<Range>{{request_start, c + PAGE}, {c + PAGE, request_end}});
+}
+
+TEST_CASE("MemoryTracker: async downloads skip empty and clean requests", "[video_core][async_download]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    tracker.UnmarkRegionAsCpuModified(c, PAGE * 2);
+    tracker.MarkRegionAsGpuModified(c, PAGE);
+    Common::RangeSet<DAddr> dirty;
+    dirty.Add(c, PAGE * 2);
+    VideoCommon::AsyncDownloadCandidates candidates;
+    const auto unexpected = [](DAddr, DAddr) { FAIL("Unexpected async download"); };
+    VideoCommon::ForEachAsyncDownloadRange(tracker, dirty, c, 0, unexpected, &candidates);
+    VideoCommon::ForEachAsyncDownloadRange(tracker, dirty, c + PAGE, PAGE, unexpected, &candidates);
+    dirty.Clear();
+    VideoCommon::ForEachAsyncDownloadRange(tracker, dirty, c, PAGE, unexpected, &candidates);
+    REQUIRE(candidates.copies == 0);
+    REQUIRE(candidates.aligned_bytes == 0);
+}
+
+TEST_CASE("MemoryTracker: upload summary retains cached writes and missing regions", "[video_core]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    REQUIRE_FALSE(tracker.HasPendingCpuUpload(c, 0));
+    REQUIRE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE));
+    tracker.ForEachUploadRange(c, HIGH_PAGE_SIZE, [](DAddr, u64) {});
+    REQUIRE_FALSE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE));
+    REQUIRE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE + PAGE));
+    tracker.CachedCpuWrite(c + PAGE, PAGE);
+    REQUIRE(tracker.HasPendingCpuUpload(c, PAGE * 2));
+    // Cached writes remove page tracking before their bytes become eligible for upload.
+    tracker.FlushCachedWrites();
+    std::vector<Range> uploads;
+    tracker.ForEachUploadRange(c, HIGH_PAGE_SIZE,
+                              [&](DAddr address, u64 size) { uploads.emplace_back(address, size); });
+    REQUIRE(uploads == std::vector<Range>{{c + PAGE, PAGE}});
+    REQUIRE_FALSE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE));
+    tracker.MarkRegionAsGpuModified(c, PAGE);
+    REQUIRE_FALSE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE));
+    tracker.MarkRegionAsCpuModified(c + WORD - 1, 2);
+    REQUIRE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE));
+    tracker.UnmarkRegionAsCpuModified(c + WORD - 1, 2);
+    REQUIRE_FALSE(tracker.HasPendingCpuUpload(c, HIGH_PAGE_SIZE));
+}
+
+TEST_CASE("WordManager: upload summary matches every CPU and untracked transition", "[video_core]") {
+    RasterizerInterface rasterizer;
+    using Manager = VideoCommon::WordManager<RasterizerInterface, 1, HIGH_PAGE_SIZE>;
+    using VideoCommon::Type;
+    Manager manager(c, rasterizer);
+    std::mt19937 random{0x704};
+    for (u32 operation = 0; operation < 12000; ++operation) {
+        const u64 page = random() % (HIGH_PAGE_SIZE / PAGE);
+        const u64 size = (std::min)(PAGE * (1 + random() % 70), HIGH_PAGE_SIZE - page * PAGE);
+        const u64 address = c + page * PAGE;
+        switch (random() % 7) {
+        case 0: manager.ChangeRegionState(Type::CPU, true, address, size); break;
+        case 1: manager.ChangeRegionState(Type::CPU, false, address, size); break;
+        case 2: manager.ChangeRegionState(Type::CachedCPU, true, address, size); break;
+        case 3: manager.FlushCachedWrites(); break;
+        case 4:
+            manager.ForEachModifiedRange(Type::CPU, true, address, size, [](DAddr, u64) {});
+            break;
+        case 5: manager.ChangeRegionState(Type::GPU, true, address, size); break;
+        case 6:
+            manager.ForEachModifiedRange(Type::GPU, true, address, size, [](DAddr, u64) {});
+            break;
+        }
+        u32 expected = 0;
+        for (size_t word = 0; word < Manager::num_words; ++word) {
+            expected += (manager.Span(Type::CPU)[word] | manager.Span(Type::Untracked)[word]) != 0;
+        }
+        REQUIRE(manager.upload_words == expected);
+        REQUIRE(manager.HasPendingUpload() == (expected != 0));
+    }
+    manager.ForEachModifiedRange(Type::CPU, true, c, HIGH_PAGE_SIZE, [](DAddr, u64) {});
+    REQUIRE_FALSE(manager.HasPendingUpload());
+    const auto before = rasterizer.UpdateCalls();
+    manager.ForEachModifiedRange(Type::CPU, true, c, HIGH_PAGE_SIZE,
+                                 [](DAddr, u64) { FAIL("clean upload emitted data"); });
+    REQUIRE(rasterizer.UpdateCalls() == before);
+}
+
+TEST_CASE("WordManager: in-place tracker coalescing preserves fragmented runs", "[video_core]") {
+    RasterizerInterface rasterizer;
+    using Manager = VideoCommon::WordManager<RasterizerInterface, 1, HIGH_PAGE_SIZE>;
+    Manager manager(c, rasterizer);
+    std::vector<Range> ranges{{c + PAGE * 5, PAGE}, {c + PAGE, PAGE}, {c, PAGE},
+                              {c + PAGE * 4, PAGE}, {c + PAGE * 9, PAGE}};
+    manager.ApplyCollectedRanges(ranges, 1);
+    REQUIRE(ranges.empty());
+    REQUIRE(rasterizer.UpdateCallsList() ==
+            std::vector<std::tuple<DAddr, u64, int>>{{c, PAGE * 2, 1},
+                {c + PAGE * 4, PAGE * 2, 1}, {c + PAGE * 9, PAGE, 1}});
 }

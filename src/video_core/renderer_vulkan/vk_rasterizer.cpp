@@ -40,6 +40,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/query_cache/query_publication.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/framebuffer_clear_layers.h"
@@ -149,12 +150,8 @@ VkRect2D GetScissorState(const Maxwell& regs, size_t index, u32 up_scale = 1, u3
     const s32 clip_height = regs.surface_clip.height;
 
     // Flip coordinates if lower left
-    s32 min_y = lower_left ? (clip_height - src.max_y) : src.min_y.Value();
-    s32 max_y = lower_left ? (clip_height - src.min_y) : src.max_y.Value();
-
-    // Bound to render area
-    min_y = (std::max)(min_y, 0);
-    max_y = (std::max)(max_y, 0);
+    const auto [min_y, max_y] = VideoCommon::ScissorYRange(
+        src.min_y.Value(), src.max_y.Value(), lower_left, clip_height);
 
     if (src.enable) {
         scissor.offset.x = scale_up(src.min_x);
@@ -468,7 +465,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
-        UpdateDynamicStates();
+        UpdateDynamicStates(pipeline);
     }
 
     query_cache.NotifySegment(true);
@@ -1052,7 +1049,8 @@ void RasterizerVulkan::DrawTexture() {
     texture_cache.SynchronizeDescriptors(false);
     texture_cache.UpdateRenderTargets(false);
 
-    UpdateDynamicStates();
+    // The built-in blit has static alpha and vertex-input state, not a guest shader pipeline.
+    UpdateDynamicStates(nullptr);
 
     query_cache.NotifySegment(true);
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
@@ -1089,6 +1087,8 @@ void RasterizerVulkan::DrawTexture() {
                          static_cast<u32>(ScaleSrc(texture.size.height)), texture.size.depth};
     blit_image.BlitColor(framebuffer, texture.RenderTarget(), texture.ImageHandle(),
                          sampler->Handle(), dst_region, src_region, src_size);
+    // BlitColor binds its own pipeline and dynamic state outside the scheduler's tracked state.
+    scheduler.InvalidateState();
 }
 
 void RasterizerVulkan::Clear(u32 layer_count) {
@@ -1108,13 +1108,14 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     const bool use_color = regs.clear_surface.R || regs.clear_surface.G || regs.clear_surface.B ||
                            regs.clear_surface.A;
     const bool use_depth = regs.clear_surface.Z;
-    const bool use_stencil = regs.clear_surface.S;
+    const bool use_stencil = regs.clear_surface.S && (regs.stencil_front_mask & 0xFF) != 0;
     if (!use_color && !use_depth && !use_stencil) {
         return;
     }
 
     std::scoped_lock lock{texture_cache.mutex};
-    texture_cache.UpdateRenderTargets(true);
+    // Captures may read attachments before the clear: initialize them normally.
+    texture_cache.UpdateRenderTargets(!frame_dump.Capturing());
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
     if (frame_dump.Capturing()) {
         FrameDumpPass(framebuffer);
@@ -1159,48 +1160,38 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         .baseArrayLayer = base_array_layer,
         .layerCount = clear_layers.count,
     };
-    const auto clamp_rect_to_render_area = [render_area](VkRect2D& rect) -> bool {
-        const auto clamp_axis = [](s32& offset, u32& extent, u32 limit) {
-            auto clamp_offset = [&offset, limit]() {
-                if (limit == 0) {
-                    offset = 0;
-                    return;
-                }
-                offset = std::clamp(offset, 0, static_cast<s32>(limit));
-            };
-
-            if (extent == 0) {
-                clamp_offset();
-                return;
-            }
-            if (offset < 0) {
-                const u32 shrink = (std::min)(extent, static_cast<u32>(-offset));
-                extent -= shrink;
-                offset = 0;
-            }
-            if (limit == 0) {
-                extent = 0;
-                offset = 0;
-                return;
-            }
-            if (offset >= s32(limit)) {
-                offset = s32(limit);
-                extent = 0;
-                return;
-            }
-            const u64 end_coord = u64(offset) + extent;
-            if (end_coord > limit) {
-                extent = limit - u32(offset);
-            }
-        };
-
-        clamp_axis(rect.offset.x, rect.extent.width, render_area.width);
-        clamp_axis(rect.offset.y, rect.extent.height, render_area.height);
-        return rect.extent.width != 0 && rect.extent.height != 0;
+    const auto rect = VideoCommon::ClampClearRect(
+        {clear_rect.rect.offset.x, clear_rect.rect.offset.y, clear_rect.rect.extent.width,
+         clear_rect.rect.extent.height}, render_area.width, render_area.height);
+    clear_rect.rect = {{rect.x, rect.y}, {rect.width, rect.height}};
+    const u32 color_attachment = regs.clear_surface.RT;
+    const auto& targets = texture_cache.GetRenderTargets();
+    const bool has_color_attachment = color_attachment < targets.color_buffer_ids.size() &&
+                                      targets.color_buffer_ids[color_attachment];
+    const VideoCommon::ClearPlan clear_plan{
+        .rect = rect,
+        .base_layer = clear_rect.baseArrayLayer,
+        .layer_count = clear_rect.layerCount,
+        .color_attachment = color_attachment,
+        .color_mask = static_cast<u8>(use_color && has_color_attachment
+            ? regs.clear_surface.R | regs.clear_surface.G << 1 | regs.clear_surface.B << 2 |
+                  regs.clear_surface.A << 3
+            : 0),
+        .depth = use_depth && framebuffer->HasAspectDepthBit(),
+        .stencil_mask = static_cast<u8>(use_stencil && framebuffer->HasAspectStencilBit()
+                                           ? regs.stencil_front_mask : 0),
     };
-    if (!clamp_rect_to_render_area(clear_rect.rect)) {
+    if (!clear_plan.HasWork()) {
         return;
     }
+    texture_cache.PrepareRenderTargetsForClear(clear_plan);
+    auto recorded_clear = clear_plan;
+    recorded_clear.color_mask = 0;
+    recorded_clear.depth = false;
+    recorded_clear.stencil_mask = 0;
+    SCOPE_EXIT {
+        texture_cache.FinishRenderTargetsClear(recorded_clear);
+    };
 
     if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_clears++ < 2048) {
         const u32 target = regs.clear_surface.RT;
@@ -1235,8 +1226,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                               !can_defer_clear && regs.zpass_pixel_count_enable);
     UpdateViewportsState(regs);
 
-    const u32 color_attachment = regs.clear_surface.RT;
-    if (use_color && framebuffer->HasAspectColorBit(color_attachment)) {
+    if (clear_plan.color_mask != 0) {
         const auto format = VideoCore::Surface::PixelFormatFromRenderTargetFormat(regs.rt[color_attachment].format);
         bool is_integer = IsPixelFormatInteger(format);
         bool is_signed = IsPixelFormatSignedInteger(format);
@@ -1253,9 +1243,9 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         }
 
         if (color_full_channels) {
-            if (can_defer_clear) {
-                scheduler.DeferColorClear(framebuffer, color_attachment, clear_value);
-            } else {
+            if (!can_defer_clear ||
+                !scheduler.DeferColorClear(framebuffer, color_attachment, clear_value)) {
+                scheduler.RequestRenderpass(framebuffer);
                 scheduler.Record([color_attachment, clear_value, clear_rect](vk::CommandBuffer cmdbuf) {
                     const VkClearAttachment attachment{
                         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1266,54 +1256,57 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                 });
             }
         } else {
-            u8 color_mask = u8(regs.clear_surface.R | regs.clear_surface.G << 1 | regs.clear_surface.B << 2 | regs.clear_surface.A << 3);
+            const u8 color_mask = clear_plan.color_mask;
             Region2D dst_region = {
                 Offset2D{.x = clear_rect.rect.offset.x, .y = clear_rect.rect.offset.y},
                 Offset2D{.x = clear_rect.rect.offset.x + s32(clear_rect.rect.extent.width),
                          .y = clear_rect.rect.offset.y + s32(clear_rect.rect.extent.height)}};
             blit_image.ClearColor(framebuffer, color_mask, regs.clear_color, dst_region);
         }
+        recorded_clear.color_mask = clear_plan.color_mask;
     }
 
     if (!use_depth && !use_stencil) {
         return;
     }
     VkImageAspectFlags aspect_flags = 0;
-    if (use_depth && framebuffer->HasAspectDepthBit()) {
+    if (clear_plan.depth) {
         aspect_flags |= VK_IMAGE_ASPECT_DEPTH_BIT;
     }
-    if (use_stencil && framebuffer->HasAspectStencilBit()) {
+    if (clear_plan.stencil_mask != 0) {
         aspect_flags |= VK_IMAGE_ASPECT_STENCIL_BIT;
     }
     if (aspect_flags == 0) {
         return;
     }
 
-    if (use_stencil && framebuffer->HasAspectStencilBit() && regs.stencil_front_mask != 0xFF &&
-        regs.stencil_front_mask != 0) {
+    if (clear_plan.stencil_mask != 0 && clear_plan.stencil_mask != 0xFF) {
         Region2D dst_region = {
             Offset2D{.x = clear_rect.rect.offset.x, .y = clear_rect.rect.offset.y},
             Offset2D{.x = clear_rect.rect.offset.x + s32(clear_rect.rect.extent.width),
                      .y = clear_rect.rect.offset.y + s32(clear_rect.rect.extent.height)}};
-        blit_image.ClearDepthStencil(framebuffer, use_depth, regs.clear_depth,
-                                     u8(regs.stencil_front_mask), regs.clear_stencil,
+        blit_image.ClearDepthStencil(framebuffer, clear_plan.depth, regs.clear_depth,
+                                     clear_plan.stencil_mask, regs.clear_stencil,
                                      regs.stencil_front_func_mask, dst_region);
-    } else if (can_defer_clear) {
+    } else {
         VkClearValue ds_value{};
         ds_value.depthStencil.depth = regs.clear_depth;
         ds_value.depthStencil.stencil = regs.clear_stencil;
-        scheduler.DeferDepthStencilClear(framebuffer, ds_value);
-    } else {
-        scheduler.Record([clear_depth = regs.clear_depth, clear_stencil = regs.clear_stencil,
-                          clear_rect, aspect_flags](vk::CommandBuffer cmdbuf) {
-            VkClearAttachment attachment;
-            attachment.aspectMask = aspect_flags;
-            attachment.colorAttachment = 0;
-            attachment.clearValue.depthStencil.depth = clear_depth;
-            attachment.clearValue.depthStencil.stencil = clear_stencil;
-            cmdbuf.ClearAttachments(attachment, clear_rect);
-        });
+        if (!can_defer_clear || !scheduler.DeferDepthStencilClear(framebuffer, ds_value)) {
+            scheduler.RequestRenderpass(framebuffer);
+            scheduler.Record([clear_depth = regs.clear_depth, clear_stencil = regs.clear_stencil,
+                              clear_rect, aspect_flags](vk::CommandBuffer cmdbuf) {
+                VkClearAttachment attachment;
+                attachment.aspectMask = aspect_flags;
+                attachment.colorAttachment = 0;
+                attachment.clearValue.depthStencil.depth = clear_depth;
+                attachment.clearValue.depthStencil.stencil = clear_stencil;
+                cmdbuf.ClearAttachments(attachment, clear_rect);
+            });
+        }
     }
+    recorded_clear.depth = clear_plan.depth;
+    recorded_clear.stencil_mask = clear_plan.stencil_mask;
 }
 
 void RasterizerVulkan::DispatchCompute() {
@@ -1688,6 +1681,10 @@ void RasterizerVulkan::SignalReference() {
 
 void RasterizerVulkan::ReleaseFences(bool force) {
     fence_manager.WaitPendingFences(force);
+}
+
+void RasterizerVulkan::FlushQueryResults(DAddr addr, u64 size) {
+    VideoCommon::FlushQueryResults(query_cache, fence_manager, scheduler, addr, size);
 }
 
 void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
@@ -2205,7 +2202,7 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
     return DmaBufferImageCopy<true>(copy_info, buffer_operand, image_operand);
 }
 
-void RasterizerVulkan::UpdateDynamicStates() {
+void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
@@ -2272,8 +2269,10 @@ void RasterizerVulkan::UpdateDynamicStates() {
         UpdateLineRasterizationMode(regs);
         UpdateLineStippleEnable(regs);
         UpdateConservativeRasterizationMode(regs);
-        UpdateAlphaToCoverageEnable(regs);
-        UpdateAlphaToOneEnable(regs);
+        if (pipeline) {
+            UpdateAlphaToCoverageEnable(regs, *pipeline);
+            UpdateAlphaToOneEnable(regs, *pipeline);
+        }
     }
 
     if (device.IsExtExtendedDynamicState3BlendingSupported()) {
@@ -2282,10 +2281,9 @@ void RasterizerVulkan::UpdateDynamicStates() {
         UpdateColorWriteEnable(regs);
     }
 
-    if (device.IsExtVertexInputDynamicStateSupported()) {
-        if (auto* gp = pipeline_cache.CurrentGraphicsPipeline(); gp && gp->HasDynamicVertexInput()) {
-            UpdateVertexInput(regs);
-        }
+    if (pipeline && device.IsExtVertexInputDynamicStateSupported() &&
+        pipeline->HasDynamicVertexInput()) {
+        UpdateVertexInput(regs);
     }
 }
 
@@ -2811,22 +2809,23 @@ void RasterizerVulkan::UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& r
         [is_enabled](vk::CommandBuffer cmdbuf) { cmdbuf.SetDepthClampEnableEXT(is_enabled); });
 }
 
-void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                                  const GraphicsPipeline& pipeline) {
     if (!state_tracker.TouchAlphaToCoverageEnable()) {
         return;
     }
     if (!device.SupportsDynamicState3AlphaToCoverageEnable()) {
         return;
     }
-    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
-    const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToCoverage() &&
+    const bool enable = pipeline.SupportsAlphaToCoverage() &&
                         regs.anti_alias_alpha_control.alpha_to_coverage != 0;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetAlphaToCoverageEnableEXT(enable ? VK_TRUE : VK_FALSE);
     });
 }
 
-void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
+void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                             const GraphicsPipeline& pipeline) {
     if (!state_tracker.TouchAlphaToOneEnable()) {
         return;
     }
@@ -2838,8 +2837,7 @@ void RasterizerVulkan::UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& r
         });
         return;
     }
-    GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
-    const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToOne() &&
+    const bool enable = pipeline.SupportsAlphaToOne() &&
                         regs.anti_alias_alpha_control.alpha_to_one != 0;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetAlphaToOneEnableEXT(enable ? VK_TRUE : VK_FALSE);

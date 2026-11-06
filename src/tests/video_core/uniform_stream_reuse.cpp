@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <span>
+#include <memory>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 
@@ -29,6 +30,8 @@ struct Runtime {
     struct StreamUniformRef {
         size_t allocation;
     };
+    VideoCommon::UniformStreamReuse<StreamUniformRef> reuse;
+    auto& UniformReuse() { return reuse; }
     std::vector<std::vector<u8>> allocations;
     StreamUniformRef last{}, bound{};
     u64 tick{1};
@@ -67,7 +70,7 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
     using VideoCommon::BindSmallUniformReusing;
     Memory memory;
     Runtime runtime;
-    VideoCommon::ResetUniformStreamReuse<Runtime>();
+    VideoCommon::ResetUniformStreamReuse(runtime);
     auto bind = [&](size_t stage, u32 slot, u64 address, u32 size) {
         Check(BindSmallUniformReusing(runtime, memory, stage, slot, slot, address, size),
               "valid small uniform rejected");
@@ -85,7 +88,7 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
     runtime.NextTick();
     bind(0, 0, 0, 64);
     Check(runtime.allocations.size() == 1, "a new command buffer reused an old allocation");
-    VideoCommon::ResetUniformStreamReuse<Runtime>();
+    VideoCommon::ResetUniformStreamReuse(runtime);
     bind(0, 0, 0, 64);
     Check(runtime.allocations.size() == 2, "session reset retained an old allocation");
     bind(4, 17, 0, 4096);
@@ -103,7 +106,7 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
         if (index % 37 == 0)
             runtime.NextTick();
         if (index % 503 == 0)
-            VideoCommon::ResetUniformStreamReuse<Runtime>();
+            VideoCommon::ResetUniformStreamReuse(runtime);
         const u32 size = 1 + random % 4096;
         const u64 address = (random >> 12) % (memory.bytes.size() - 4096);
         if (index % 3 == 0)
@@ -113,4 +116,43 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
         bind(stage, slot, address, size);
         bind(stage, slot, address, size);
     }
+}
+
+
+TEST_CASE("Root uniform reuse preserves padding, mutations and runtime ownership", "[video_core]") {
+    using VideoCommon::BindPaddedUniformReusing;
+    auto first = std::make_unique<Runtime>();
+    auto second = std::make_unique<Runtime>();
+    std::array<u8, 256> root{};
+    root[63] = 42;
+    const auto bind = [&](Runtime& runtime, u32 size) {
+        REQUIRE(BindPaddedUniformReusing(runtime, 4, 17, 3, root, size));
+        const auto& bytes = runtime.allocations.at(runtime.bound.allocation);
+        REQUIRE(bytes.size() == size);
+        for (size_t i = 0; i < bytes.size(); ++i) {
+            REQUIRE(bytes[i] == (i < root.size() ? root[i] : 0));
+        }
+    };
+    bind(*first, 512);
+    bind(*second, 512);
+    bind(*first, 512);
+    REQUIRE(first->allocations.size() == 1);
+    REQUIRE(second->allocations.size() == 1);
+    root[63] = 18;
+    bind(*first, 512);
+    REQUIRE(first->allocations.size() == 2);
+    bind(*second, 512);
+    REQUIRE(second->allocations.size() == 2);
+    bind(*first, 64);
+    REQUIRE(first->allocations.size() == 3);
+    first->NextTick();
+    bind(*first, 64);
+    REQUIRE(first->allocations.size() == 1);
+    VideoCommon::ResetUniformStreamReuse(*second);
+    bind(*first, 64);
+    REQUIRE(first->allocations.size() == 1);
+    bind(*second, 512);
+    REQUIRE(second->allocations.size() == 3);
+    REQUIRE_FALSE(BindPaddedUniformReusing(*first, 4, 17, 3, root, 4097));
+    REQUIRE_FALSE(BindPaddedUniformReusing(*first, 4, 17, 3, root, 0));
 }

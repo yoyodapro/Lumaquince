@@ -35,7 +35,14 @@ std::vector<Asset> Release::GetPlatformAssets(std::string_view platform) const {
     }
 
     const std::string host_url = "https://github.com";
-    const auto path = fmt::format("/{}/releases/download/{}/", Common::g_build_auto_update_repo, tag);
+    const auto tag_path = fmt::format("/releases/download/{}", tag);
+    if (!base_download_url.starts_with('/') || !base_download_url.ends_with(tag_path) ||
+        base_download_url.size() <= tag_path.size() + 1) {
+        return {};
+    }
+    // This release's explicit repository and tag must remain consistent, independently of
+    // the application's optional update-service configuration.
+    const auto path = base_download_url + '/';
     for (const auto extension : extensions) {
         const auto filename = fmt::format("lichii-{}{}", platform, extension);
         for (const auto& asset : assets) {
@@ -74,6 +81,8 @@ static inline u64 ParseIsoTimestamp(const std::string& iso) {
 std::optional<Release> Release::FromJson(const nlohmann::json& json, const std::string& host,
                                          const std::string& repo) {
     Release rel;
+    if (host.empty() || repo.empty())
+        return std::nullopt;
     if (!json.is_object())
         return std::nullopt;
     if (json.value("draft", false))
@@ -98,8 +107,8 @@ std::optional<Release> Release::FromJson(const nlohmann::json& json, const std::
 
     rel.host = host;
 
-    const auto release_base =
-        fmt::format("{}/{}/releases", Common::g_build_auto_update_website, repo);
+    const std::string website = host == "https://api.github.com" ? "https://github.com" : host;
+    const auto release_base = fmt::format("{}/{}/releases", website, repo);
     const auto fallback_html = fmt::format("{}/tag/{}", release_base, rel.tag);
     rel.html_url = json.value("html_url", fallback_html);
 

@@ -76,6 +76,12 @@ TEST_CASE("Lichii selects only the matching platform and PGO variant", "[updater
           "/zortos293/Lichii/releases/download/build-71/" + selected[0].filename);
     CHECK_FALSE(release.GetPlatformAssets("android-arm64").size());
     CHECK_FALSE(release.GetPlatformAssets("").size());
+    auto retagged = release;
+    retagged.tag = "build-72";
+    CHECK(retagged.GetPlatformAssets(platform).empty());
+    auto missing_repository_path = release;
+    missing_repository_path.base_download_url.clear();
+    CHECK(missing_repository_path.GetPlatformAssets(platform).empty());
 }
 
 TEST_CASE("Lichii skips releases without its asset and falls back to Linux archives", "[updater]") {
@@ -122,6 +128,47 @@ TEST_CASE("GitHub optional fields can be null or missing", "[updater]") {
     CHECK(releases[0].title == "build-71");
     CHECK(releases[0].assets.empty());
     CHECK(releases[0].html_url == "https://github.com/zortos293/Lichii/releases/tag/build-71");
+
+    SECTION("Explicit repository drives URLs independently of application metadata") {
+        const nlohmann::json entry{
+            {"tag_name", "build-71"},
+            {"assets", {{{"browser_download_url",
+                "https://github.com/fixture/independent/releases/download/build-71/"
+                "lichii-windows-x86_64.zip"}}}},
+        };
+        const auto release = Common::Net::Release::FromJson(
+            entry, "https://api.github.com", "fixture/independent");
+        REQUIRE(release);
+        CHECK(release->html_url ==
+              "https://github.com/fixture/independent/releases/tag/build-71");
+        const auto assets = release->GetPlatformAssets("windows-x86_64");
+        REQUIRE(assets.size() == 1);
+        CHECK(assets[0].url == "https://github.com");
+        CHECK(assets[0].path ==
+              "/fixture/independent/releases/download/build-71/lichii-windows-x86_64.zip");
+        auto foreign = *release;
+        foreign.assets = MakeRelease("build-71", "lichii-windows-x86_64.zip").assets;
+        CHECK(foreign.GetPlatformAssets("windows-x86_64").empty());
+    }
+    SECTION("Explicit Forgejo website is retained") {
+        const auto release = Common::Net::Release::FromJson(
+            nlohmann::json{{"tag_name", "build-71"}}, "https://forge.example.invalid", "owner/project");
+        REQUIRE(release);
+        CHECK(release->html_url ==
+              "https://forge.example.invalid/owner/project/releases/tag/build-71");
+    }
+    SECTION("Lookalike API hostname is not rewritten to GitHub") {
+        const auto release = Common::Net::Release::FromJson(
+            nlohmann::json{{"tag_name", "build-71"}}, "https://api.github.com.example.invalid", "owner/project");
+        REQUIRE(release);
+        CHECK(release->html_url ==
+              "https://api.github.com.example.invalid/owner/project/releases/tag/build-71");
+    }
+    SECTION("Empty explicit repository or host does not inherit application defaults") {
+        const nlohmann::json entry{{"tag_name", "build-71"}};
+        CHECK_FALSE(Common::Net::Release::FromJson(entry, "https://api.github.com", ""));
+        CHECK_FALSE(Common::Net::Release::FromJson(entry, "", "owner/project"));
+    }
 }
 
 TEST_CASE("Release requests handle HTTP failures without throwing", "[updater]") {

@@ -30,6 +30,7 @@
 #include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "video_core/texture_cache/threshold_logging.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_profile.h"
@@ -273,9 +274,14 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
         }
     }
     if (log) {
-        LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
-                 expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
+        LogThresholds();
     }
+}
+
+template <class P>
+void TextureCache<P>::LogThresholds() const {
+    LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
+             expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
 }
 
 template <class P>
@@ -350,13 +356,14 @@ void TextureCache<P>::TickFrame() {
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
                     // Log the first values and real changes (the budget moves by a few MiB all
-                    // the time).
-                    const u64 change = critical_memory > old_critical
-                                           ? critical_memory - old_critical
-                                           : old_critical - critical_memory;
-                    const bool log = budget_check_frames == 1 || change >= 256_MiB;
-                    ApplyThresholdOverrides(log);
+                    // the time). Compare effective thresholds after the cap and overrides.
+                    const bool log = ApplyTextureThresholdsAndShouldLog(
+                        old_critical, budget_check_frames == 1, [&] {
+                            ApplyThresholdOverrides(false);
+                            return critical_memory;
+                        });
                     if (log) {
+                        LogThresholds();
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, block slack {} MiB",
                                  margin >> 20, pressure_margin >> 20, slack_margin >> 20);
@@ -794,14 +801,34 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
         }
     } clearing_scope{clearing_render_targets};
     clearing_render_targets = is_clear;
+    const auto prepare = [&] {
+        const auto can_defer = [&](ImageViewId id) {
+            if (!id) {
+                return true;
+            }
+            const ImageBase& image = slot_images[slot_image_views[id].image_id];
+            constexpr auto incompatible = ImageFlagBits::Sparse | ImageFlagBits::Unbacked |
+                ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                ImageFlagBits::UnwrittenSparse | ImageFlagBits::Remapped |
+                ImageFlagBits::IsDecoding | ImageFlagBits::TrimmedLevels;
+            return image.aliased_images.empty() && image.overlapping_images.empty() &&
+                   False(image.flags & incompatible);
+        };
+        // Alias synchronization can rescale images and replace views. Finish it before the
+        // backend resolves its framebuffer; only stable attachments use deferred preparation.
+        clear_preparation_deferred = is_clear &&
+            std::ranges::all_of(render_targets.color_buffer_ids, can_defer) &&
+            can_defer(render_targets.depth_buffer_id);
+        if (!clear_preparation_deferred) {
+            for (const ImageViewId id : render_targets.color_buffer_ids) {
+                PrepareImageView(id, true, false);
+            }
+            PrepareImageView(render_targets.depth_buffer_id, true, false);
+        }
+    };
     auto& flags = maxwell3d->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
-        for (size_t index = 0; index < NUM_RT; ++index) {
-            ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-            PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
-        }
-        const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-        PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
+        prepare();
         return;
     }
 
@@ -813,13 +840,8 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
         is_rescaling = rescaled;
     }
 
-    for (size_t index = 0; index < NUM_RT; ++index) {
-        ImageViewId& color_buffer_id = render_targets.color_buffer_ids[index];
-        PrepareImageView(color_buffer_id, true, is_clear && IsFullClear(color_buffer_id));
-    }
+    prepare();
     const ImageViewId depth_buffer_id = render_targets.depth_buffer_id;
-
-    PrepareImageView(depth_buffer_id, true, is_clear && IsFullClear(depth_buffer_id));
 
     rt_active_mask = 0;
     rt_image_id = {};
@@ -1081,6 +1103,13 @@ template <class P>
 bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
                                 const Tegra::Engines::Fermi2D::Surface& src,
                                 const Tegra::Engines::Fermi2D::Config& copy) {
+    // A deferred clear parked before this copy has to land before it: realizing it afterwards
+    // starts its clear pass after the copy and wipes what the copy wrote. That is what made
+    // Ocarina of Time draw its terrain layer over the scene (#101): the game clears the
+    // occlusion depth, blits the scene depth over it, and reads it back during the layer draw.
+    // GetFramebufferId only flushes when it creates a framebuffer, so the bug starts on the
+    // second frame. Texture cache copies bypass render passes and keep stream order here.
+    runtime.FlushDeferredClear();
     const auto result = GetBlitImages(dst, src, copy);
     if (!result) {
         return false;
@@ -2092,11 +2121,13 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) 
         *gpu_memory, gpu_addr, image.guest_size_bytes, &swizzle_data_buffer);
     if (True(image.flags & ImageFlagBits::Converted)) {
         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
-        auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer);
+        auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data,
+                                    unswizzle_data_buffer, &unswizzle_worker);
         ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
         image.UploadMemory(staging, copies);
     } else {
-        const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span);
+        const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data,
+                                          mapped_span, &unswizzle_worker);
         image.UploadMemory(staging, copies);
     }
 }
@@ -2701,65 +2732,19 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         DeleteImage(overlap_id);
     }
 
-    // A new render target that the clear binding it overwrites whole (every channel, the whole
-    // image) needs no upload from guest memory first: Ocarina of Time creates ~4 such targets a
-    // frame outdoors, and uploading them was ~15% of the GPU back thread.
-    const auto overwritten_by_clear = [&] {
-        if (!clearing_render_targets || !join_copies_to_do.empty() ||
-            new_info.type != ImageType::e2D || new_info.resources.levels != 1 ||
-            new_info.resources.layers != 1 || new_info.num_samples != 1) {
-            return false;
-        }
-        const auto& regs = maxwell3d->regs;
-        const auto& surface = regs.clear_surface;
-        if (surface.layer != 0) {
-            return false;
-        }
-        const u32 width = new_info.size.width;
-        const u32 height = new_info.size.height;
-        if (regs.clear_control.use_scissor != 0) {
-            const auto& scissor = regs.scissor_test[0];
-            if (scissor.min_x != 0 || scissor.min_y != 0 || scissor.max_x < width ||
-                scissor.max_y < height) {
-                return false;
-            }
-        }
-        // The clear covers the framebuffer's render area, the smallest bound target.
-        for (u32 index = 0; index < regs.rt_control.count && index < NUM_RT; ++index) {
-            const auto& rt = regs.rt[index];
-            if (rt.Address() != 0 && rt.format != Tegra::RenderTargetFormat::NONE &&
-                (rt.width < width || rt.height < height)) {
-                return false;
-            }
-        }
-        if (regs.zeta_enable && regs.zeta.Address() != 0 &&
-            (regs.zeta_size.width < width || regs.zeta_size.height < height)) {
-            return false;
-        }
-        const bool is_depth_target = regs.zeta_enable && regs.zeta.Address() == gpu_addr;
-        const bool full_stencil = surface.S && regs.stencil_front_mask == 0xFF;
-        switch (VideoCore::Surface::GetFormatType(new_info.format)) {
-        case VideoCore::Surface::SurfaceType::ColorTexture: {
-            const u32 index = surface.RT;
-            return surface.R && surface.G && surface.B && surface.A && index < NUM_RT &&
-                   index < regs.rt_control.count && regs.rt[index].Address() == gpu_addr;
-        }
-        case VideoCore::Surface::SurfaceType::Depth:
-            return is_depth_target && surface.Z;
-        case VideoCore::Surface::SurfaceType::Stencil:
-            return is_depth_target && full_stencil;
-        case VideoCore::Surface::SurfaceType::DepthStencil:
-            return is_depth_target && surface.Z && full_stencil;
-        default:
-            return false;
-        }
-    };
-    if (overwritten_by_clear()) {
-        // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
-        // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
+    // No contents are discarded here. The backend resolves its actual clear after binding;
+    // partial or rejected clears leave this image CpuModified and therefore require an upload.
+    constexpr auto no_defer_flags = ImageFlagBits::Sparse | ImageFlagBits::Unbacked |
+                                    ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                                    ImageFlagBits::UnwrittenSparse | ImageFlagBits::Remapped;
+    const bool defer_upload = clearing_render_targets && join_copies_to_do.empty() &&
+                              join_bad_overlap_ids.empty() && join_left_aliased_ids.empty() &&
+                              join_right_aliased_ids.empty() && new_info.type == ImageType::e2D &&
+                              new_info.resources.levels == 1 && new_info.resources.layers == 1 &&
+                              new_info.num_samples == 1 && False(new_image.flags & no_defer_flags);
+    if (defer_upload) {
         runtime.TransitionImageLayout(new_image);
     } else {
-        // TODO: Only upload what we need
         RefreshContents(new_image, new_image_id);
     }
 
@@ -2988,6 +2973,8 @@ ImageId TextureCache<P>::FindDMAImage(const ImageInfo& info, GPUVAddr gpu_addr) 
 template <class P>
 std::pair<u32, u32> TextureCache<P>::PrepareDmaImage(ImageId dst_id, GPUVAddr base_addr,
                                                      bool mark_as_modified) {
+    // As in BlitImage: land a parked deferred clear before the DMA write.
+    runtime.FlushDeferredClear();
     const auto& image = slot_images[dst_id];
     const auto base = image.TryFindBase(base_addr);
     PrepareImage(dst_id, mark_as_modified, false);
@@ -3669,17 +3656,15 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
 template <class P>
 void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool invalidate) {
     Image& image = slot_images[image_id];
-    if (invalidate) {
-        image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
-        if (False(image.flags & ImageFlagBits::Tracked)) {
-            TrackImage(image, image_id);
-        }
-    } else {
-        RefreshContents(image, image_id);
-        if (!image.aliased_images.empty()) {
-            SynchronizeAliases(image_id);
-        }
-    }
+    PrepareImageContents(
+        image, invalidate,
+        [&] {
+            RefreshContents(image, image_id);
+            if (!image.aliased_images.empty()) {
+                SynchronizeAliases(image_id);
+            }
+        },
+        [&] { TrackImage(image, image_id); });
     if (is_modification) {
         if constexpr (requires { &Image::BackTilesWhole; }) {
             if (True(image.flags & ImageFlagBits::SparseTiles) && image.SparseTilesShareZeroBlock()) {
@@ -3734,6 +3719,8 @@ void TextureCache<P>::PrepareImageView(ImageViewId image_view_id, bool is_modifi
 
 template <class P>
 void TextureCache<P>::CopyImage(ImageId dst_id, ImageId src_id, std::vector<ImageCopy> copies) {
+    // As in BlitImage: land a parked deferred clear before the copy overwrites the image.
+    runtime.FlushDeferredClear();
     Image& dst = slot_images[dst_id];
     Image& src = slot_images[src_id];
     if (True(dst.flags & ImageFlagBits::UnwrittenSparse) ||
@@ -3875,26 +3862,70 @@ std::pair<FramebufferId, ImageViewId> TextureCache<P>::RenderTargetFromImage(
 }
 
 template <class P>
-bool TextureCache<P>::IsFullClear(ImageViewId id) {
+void TextureCache<P>::PrepareRenderTargetsForClear(const ClearPlan& clear) {
+    if (!clear_preparation_deferred) {
+        return;
+    }
+    const auto prepare = [&](ImageViewId id, u32 attachment) {
+        PrepareClearTarget(clear, GetClearImageCoverage(id, attachment),
+                           [&](bool modified, bool invalidate) {
+                               PrepareImageView(id, modified, invalidate);
+                           });
+    };
+    for (u32 index = 0; index < NUM_RT; ++index) {
+        prepare(render_targets.color_buffer_ids[index], index);
+    }
+    prepare(render_targets.depth_buffer_id, ClearDepthStencilAttachment);
+}
+
+template <class P>
+void TextureCache<P>::FinishRenderTargetsClear(const ClearPlan& recorded_clear) {
+    if (!clear_preparation_deferred) {
+        return;
+    }
+    const auto finish = [&](ImageViewId id, u32 attachment) {
+        FinishClearTarget(recorded_clear, GetClearImageCoverage(id, attachment),
+                          [&](bool modified, bool invalidate) {
+                              PrepareImageView(id, modified, invalidate);
+                          });
+    };
+    for (u32 index = 0; index < NUM_RT; ++index) {
+        finish(render_targets.color_buffer_ids[index], index);
+    }
+    finish(render_targets.depth_buffer_id, ClearDepthStencilAttachment);
+    clear_preparation_deferred = false;
+}
+
+template <class P>
+ClearImageCoverage TextureCache<P>::GetClearImageCoverage(ImageViewId id, u32 attachment) {
     if (!id) {
-        return true;
+        return {};
     }
-    const ImageViewBase& image_view = slot_image_views[id];
-    const ImageBase& image = slot_images[image_view.image_id];
-    const Extent3D size = image_view.size;
-    const auto& regs = maxwell3d->regs;
-    const auto& scissor = regs.scissor_test[0];
-    if (image.info.resources.levels > 1 || image.info.resources.layers > 1) {
-        // Images with multiple resources can't be cleared in a single call
-        return false;
-    }
-    if (regs.clear_control.use_scissor == 0) {
-        // If scissor testing is disabled, the clear is always full
-        return true;
-    }
-    // Make sure the clear covers all texels in the subresource
-    return scissor.min_x == 0 && scissor.min_y == 0 && scissor.max_x >= size.width &&
-           scissor.max_y >= size.height;
+    const ImageViewBase& view = slot_image_views[id];
+    const ImageBase& image = slot_images[view.image_id];
+    const auto type = GetFormatType(image.info.format);
+    constexpr auto incompatible = ImageFlagBits::Sparse | ImageFlagBits::Unbacked |
+                                  ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
+                                  ImageFlagBits::UnwrittenSparse | ImageFlagBits::Remapped |
+                                  ImageFlagBits::IsDecoding | ImageFlagBits::TrimmedLevels;
+    const auto& resolution = Settings::values.resolution_info;
+    const bool scaled = True(image.flags & ImageFlagBits::Rescaled);
+    return {
+        .attachment = attachment,
+        .width = scaled ? resolution.ScaleUp(image.info.size.width) : image.info.size.width,
+        .height = scaled ? resolution.ScaleUp(image.info.size.height) : image.info.size.height,
+        .levels = image.info.resources.levels,
+        .layers = image.info.resources.layers,
+        .samples = image.info.num_samples,
+        .view = view.range,
+        .is_2d = image.info.type == ImageType::e2D,
+        .storage_matches_view = view.format == image.info.format && view.size == image.info.size &&
+                                False(image.flags & incompatible) && image.aliased_images.empty() &&
+                                image.overlapping_images.empty(),
+        .has_color = type == SurfaceType::ColorTexture,
+        .has_depth = type == SurfaceType::Depth || type == SurfaceType::DepthStencil,
+        .has_stencil = type == SurfaceType::Stencil || type == SurfaceType::DepthStencil,
+    };
 }
 
 template <class P>

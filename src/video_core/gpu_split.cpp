@@ -86,6 +86,24 @@ void GpuSplit::CheckOwner(const char* where) {
 
 GpuSplit GpuSplit::instance;
 
+GpuSplit::SpinBudgets GpuSplit::GetSpinBudgets() const {
+    const u64 value = spin_budgets.load(std::memory_order_relaxed);
+    return {static_cast<u32>(value & 0xffff), static_cast<u32>((value >> 16) & 0xffff),
+            static_cast<u32>((value >> 32) & 0xffff)};
+}
+
+bool GpuSplit::SetSpinBudgets(SpinBudgets budgets) {
+    constexpr SpinBudgets maximum{};
+    if (budgets.front > maximum.front || budgets.capacity > maximum.capacity ||
+        budgets.back > maximum.back) {
+        return false;
+    }
+    spin_budgets.store(u64{budgets.front} | (u64{budgets.capacity} << 16) |
+                          (u64{budgets.back} << 32),
+                      std::memory_order_relaxed);
+    return true;
+}
+
 void GpuSplit::MaybeStart(Core::System& system_) {
     static const char mode = [] {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
@@ -111,9 +129,17 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     if (active || !allowed) {
         return;
     }
+    SpinBudgets configured;
+    configured.front = Common::BoundedSpinWait::ConfiguredSpins(
+        std::getenv("EDEN_NX2_SPIN_FRONT"), configured.front);
+    configured.capacity = Common::BoundedSpinWait::ConfiguredSpins(
+        std::getenv("EDEN_NX2_SPIN_CAPACITY"), configured.capacity);
+    configured.back = Common::BoundedSpinWait::ConfiguredSpins(
+        std::getenv("EDEN_NX2_SPIN_BACK"), configured.back);
+    SetSpinBudgets(configured);
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
-    ring = std::make_unique<u64[]>(RingWords);
+    ring = std::make_unique<std::byte[]>(RingWords * sizeof(u64));
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
@@ -130,7 +156,17 @@ void GpuSplit::Stop() {
     wake.fetch_add(1, std::memory_order_seq_cst);
     wake.notify_one();
     back_thread.join();
+    back_quiet.store(true, std::memory_order_relaxed);
+    hook_requested.store(false, std::memory_order_relaxed);
     active = false;
+    // The front has stopped producing. Cancel committed work the back did not execute,
+    // including unpublished entries, without invoking callbacks during shutdown.
+    u64 read_position = consumed.load(std::memory_order_relaxed);
+    while (read_position != write_position) {
+        const size_t index = read_position & RingMask;
+        const size_t size = Discard(EntryAt(index));
+        read_position += size != 0 ? size : RingWords - index;
+    }
     // The split is static and outlives the emulation session. The next session's back thread
     // starts reading at 0: with the old positions kept it skipped through the new, empty ring a
     // wrap at a time and never reached the old write position (the next game's first GPU work
@@ -148,6 +184,7 @@ void GpuSplit::Stop() {
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
+    wait_target.store(~u64{0}, std::memory_order_relaxed);
 }
 
 u64* GpuSplit::ReserveSlow(size_t words) {
@@ -156,31 +193,19 @@ u64* GpuSplit::ReserveSlow(size_t words) {
         // Entries never wrap: skip to the start of the ring.
         const size_t rest = RingWords - index;
         WaitForSpace(rest);
-        ring[index] = static_cast<u64>(Kind::Wrap);
+        std::construct_at(EntryAt(index), static_cast<u64>(Kind::Wrap));
         write_position += rest;
         index = 0;
     }
     WaitForSpace(words);
-    return &ring[index];
+    return PrepareEntry(index, words);
 }
 
 void GpuSplit::WaitForSpace(size_t words) {
     if (write_position + words - consumed_cache <= RingWords) {
         return;
     }
-    Publish();
-    Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
-    for (u32 spins = 0;; ++spins) {
-        consumed_cache = consumed.load(std::memory_order_acquire);
-        if (write_position + words - consumed_cache <= RingWords) {
-            return;
-        }
-        if (spins < 4096) {
-            Pause();
-        } else {
-            std::this_thread::yield();
-        }
-    }
+    WaitFor(write_position + words - RingWords, DrainSite::Other, GetSpinBudgets().capacity);
 }
 
 void GpuSplit::Publish() {
@@ -198,36 +223,44 @@ void GpuSplit::Publish() {
 
 void GpuSplit::Drain(DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
-    if (consumed_cache == write_position) {
+    if (consumed_cache == write_position && BackQuiet()) {
         return;
     }
     Publish();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Now() : 0;
-    for (u32 spins = 0;; ++spins) {
+    // Everything consumed is not enough: the back submits deferred work (Scheduler::DeferFlush)
+    // from its idle hook afterwards, and the caller may use the scheduler once this returns.
+    bool hook_asked = false;
+    const u32 spins = GetSpinBudgets().front;
+    Common::BoundedSpinWait::Wait(front_progress, [&] {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache == write_position) {
-            publish_every = 8;
-            Nx2Profile::AddDrain(site, start);
-            return;
+            if (BackQuiet()) {
+                return true;
+            }
+            if (!hook_asked) {
+                RequestIdleHook();
+                hook_asked = true;
+            }
         }
-        if (spins < 16384) {
-            Pause();
-        } else {
-            std::this_thread::yield();
-        }
-    }
+        return false;
+    }, spins);
+    publish_every = 8;
+    Nx2Profile::AddDrain(site, start);
 }
 
 bool GpuSplit::WaitForWriters() {
-    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters,
+                   GetSpinBudgets().front);
 }
 
 bool GpuSplit::WaitForSync() {
-    return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
+    return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync,
+                   GetSpinBudgets().front);
 }
 
-bool GpuSplit::WaitFor(u64 target, DrainSite site) {
+bool GpuSplit::WaitFor(u64 target, DrainSite site, u32 spins) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {
         return false;
@@ -236,19 +269,13 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Now() : 0;
-    for (u32 spins = 0;; ++spins) {
+    Common::BoundedSpinWait::Wait(front_progress, [&] {
         consumed_cache = consumed.load(std::memory_order_acquire);
-        if (consumed_cache >= target) {
-            wait_target.store(~u64{0}, std::memory_order_relaxed);
-            Nx2Profile::AddDrain(site, start);
-            return true;
-        }
-        if (spins < 16384) {
-            Pause();
-        } else {
-            std::this_thread::yield();
-        }
-    }
+        return consumed_cache >= target;
+    }, spins);
+    wait_target.store(~u64{0}, std::memory_order_relaxed);
+    Nx2Profile::AddDrain(site, start);
+    return true;
 }
 
 void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
@@ -285,15 +312,15 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, 
 }
 
 void GpuSplit::DeferFunction(std::function<void()>&& func) {
-    auto* const heap = new std::function<void()>(std::move(func));
-    Defer([heap] {
-        (*heap)();
-        delete heap;
-    });
+    u64* const entry = Reserve(FunctionWords);
+    std::construct_at(FunctionAddress(entry), std::move(func));
+    std::construct_at(entry, static_cast<u64>(Kind::Function));
+    Commit(FunctionWords);
 }
 
-size_t GpuSplit::Execute(const u64* entry) {
-    const u64 head = entry[0];
+size_t GpuSplit::Execute(u64* entry) {
+    u64 head;
+    std::memcpy(&head, entry, sizeof(head));
     switch (static_cast<Kind>(head & 0xf)) {
     case Kind::Wrap:
         return 0;
@@ -339,6 +366,35 @@ size_t GpuSplit::Execute(const u64* entry) {
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
     }
+    case Kind::Function: {
+        auto* const stored = std::launder(FunctionAddress(entry));
+        Function func{std::move(*stored)};
+        std::destroy_at(stored);
+        func();
+        return FunctionWords;
+    }
+    }
+    return 1;
+}
+
+size_t GpuSplit::Discard(u64* entry) {
+    u64 head;
+    std::memcpy(&head, entry, sizeof(head));
+    switch (static_cast<Kind>(head & 0xf)) {
+    case Kind::Wrap:
+        return 0;
+    case Kind::Engine:
+        return 2;
+    case Kind::Method:
+        return (head & HasSegment) != 0 ? 2 : 1;
+    case Kind::Multi:
+        return ((head & HasSegment) != 0 ? 3 : 2) +
+               (static_cast<u32>(head >> 32) + 1) / 2;
+    case Kind::Call:
+        return 2 + static_cast<size_t>((head >> 8) & 0xffffff);
+    case Kind::Function:
+        std::destroy_at(std::launder(FunctionAddress(entry)));
+        return FunctionWords;
     }
     return 1;
 }
@@ -361,15 +417,24 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            const u32 budget = GetSpinBudgets().back;
+            for (u32 spins = 0; spins < budget && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
                 available = published.load(std::memory_order_acquire);
             }
-            if (available == read_position && idle_hook != nullptr) {
+            if (available == read_position) {
                 hook_requested.store(false, std::memory_order_seq_cst);
-                idle_hook(idle_argument);
+                // The front may already see everything consumed: Drain() waits for back_quiet
+                // too, so the deferred submit can't overlap whatever the front does next.
+                if (!back_quiet.load(std::memory_order_relaxed)) {
+                    if (idle_hook != nullptr) {
+                        idle_hook(idle_argument);
+                    }
+                    back_quiet.store(true, std::memory_order_release);
+                    NotifyFront();
+                }
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position) {
@@ -388,9 +453,11 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
         }
         u64 last_store = read_position;
+        // Before any entry runs, so a front that sees these entries consumed also sees this.
+        back_quiet.store(false, std::memory_order_seq_cst);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
-            const size_t size = Execute(&ring[index]);
+            const size_t size = Execute(EntryAt(index));
             read_position += size != 0 ? size : RingWords - index;
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
@@ -404,11 +471,18 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 read_position != available) {
                 consumed.store(read_position, std::memory_order_release);
                 last_store = read_position;
+                NotifyFront();
             }
         }
         consumed.store(read_position, std::memory_order_release);
+        NotifyFront();
+    }
+    // Submit deferred fence ticks before relinquishing scheduler ownership.
+    if (idle_hook != nullptr) {
+        idle_hook(idle_argument);
     }
     back_running.store(false, std::memory_order_release);
+    NotifyFront();
 }
 
 } // namespace VideoCommon

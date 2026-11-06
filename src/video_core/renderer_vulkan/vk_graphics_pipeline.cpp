@@ -1122,10 +1122,8 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         };
         dynamic_states.insert(dynamic_states.end(), extended.begin(), extended.end());
 
-        // VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT
-        if (!key.state.dynamic_vertex_input) {
-            dynamic_states.push_back(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT);
-        }
+        // Buffer bindings update strides even when vertex formats are dynamic.
+        dynamic_states.push_back(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT);
     }
 
     // VK_DYNAMIC_STATE_VERTEX_INPUT_EXT

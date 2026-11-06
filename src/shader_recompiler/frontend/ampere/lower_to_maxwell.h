@@ -39,7 +39,7 @@ struct LoweredProgram {
     u32 source_size{};
     u32 required_texture_buffer = ~0U;
     // UR28 and up seen without a mirror: lowering again with this many registers below R216
-    // reserved for them (even, so pairs stay adjacent) maps them.
+    // reserved for them (quartet aligned for register shadows) maps them.
     u32 high_uniform_registers{};
     u32 error_offset{};
     std::string_view error;
@@ -74,6 +74,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         const u32 op = instruction.Bits(0, 12);
         uses_uniform_bank |= op == 0xf66 || op == 0xf6c;
         uses_uniform_bank |= op == 0xc3e || op == 0x499 || op == 0x2bf || op == 0x4a4;
+        uses_uniform_bank |= op == 0xc19;
         uses_uniform_bank |= op == 0x987 ||
             ((op == 0x387 || op == 0x983) && instruction.Bits(91, 1));
         uses_uniform_bank |= op == 0x3c4 || op == 0x2bd || op == 0x896 || op == 0xf60 || op == 0xc11 || op == 0xd08 || op == 0xc0c || op == 0x986 || op == 0x9a8 || op == 0xc12 || op == 0xc17 || op == 0xe24 || op == 0xc24 || op == 0xd00 || op == 0xd09 || op == 0x9c3 || op == 0xc45 || op == 0x2a4 || op == 0x891 || op == 0x890 || op == 0x290 || op == 0x28c || op == 0x88c || op == 0x287 || op == 0x887 || op == 0x958 || op == 0xab9 || op == 0xabb || op == 0x899 || op == 0xc20 || op == 0xe21 || op == 0xe23 || op == 0xc02 ||
@@ -305,7 +306,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         bool requires_shadow = false;
         for (u32 bit : {16U, 24U, 32U, 64U}) {
             if (opcode == 0x81c) break;
-            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927) continue;
+            // Bits 32-39 name a register in register forms and in these opcodes: TEX/TLD, TXD's
+            // gradients, and the data operand of the stores, ISBEWR (0x927), the global atomic
+            // (0x9a8), RED (0x98e) and SURED (0x59f), all listed with operand 32 in RegisterPressure.
+            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0xb6c && opcode != 0xf6c && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927 && opcode != 0x9a8 && opcode != 0x98e && opcode != 0x59f) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= (uses_uniform_bank ? high_uniform_base : 246U) && reg < 255)
                 requires_shadow = true;
@@ -328,7 +332,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (reg < 28) return 218 + reg;
             if (reg == 63) return 255;
             if (reg < 63 && reg - 28 < high_uniforms) return high_uniform_base + (reg - 28);
-            if (reg < 63) result.high_uniform_registers = (std::max)(result.high_uniform_registers, (reg - 26) & ~1U);
+            if (reg < 63) result.high_uniform_registers = (std::max)(result.high_uniform_registers, (reg - 24) & ~3U);
             return ~0U;
         };
         bool rewritten_uniform = false;

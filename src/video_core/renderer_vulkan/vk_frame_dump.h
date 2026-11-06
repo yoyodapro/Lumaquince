@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/renderer_vulkan/frame_dump_draw_metadata.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -114,7 +115,7 @@ public:
     /// Starts a pass when the framebuffer changes and captures the previous one.
     /// Returns true when copies were recorded, which ends the current render pass.
     bool BeginPass(const void* framebuffer, std::span<ImageView* const> colors);
-    void NoteDraw(std::span<const u64> shader_hashes);
+    void NoteDraw(std::span<const u64, 6> shader_hashes);
     /// Captures the current pass; returns true when copies were recorded.
     bool EndPass();
     void CaptureDispatch(u64 shader_hash, std::span<ImageView* const> written);
@@ -200,6 +201,7 @@ private:
     u32 pass_first_draw{};
     u32 draws{};
     u32 dispatches{};
+    FrameDumpDrawMetadata draw_metadata;
 
     std::thread writer;
     std::mutex queue_mutex;

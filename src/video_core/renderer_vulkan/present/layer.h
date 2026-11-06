@@ -62,6 +62,8 @@ public:
                        const Tegra::FramebufferConfig& framebuffer,
                        const Layout::FramebufferLayout& layout);
 
+    void MarkDrawUsed(size_t image_index);
+
 private:
     void CreateDescriptorPool(const Device& device);
     void CreateDescriptorSets(const Device& device, VkDescriptorSetLayout layout);
@@ -97,6 +99,7 @@ private:
     std::vector<vk::ImageView> raw_image_views{};
     u32 raw_width{};
     u32 raw_height{};
+    u32 raw_stride{};
     Service::android::PixelFormat pixel_format{};
 
     Settings::AntiAliasing anti_alias_setting{};

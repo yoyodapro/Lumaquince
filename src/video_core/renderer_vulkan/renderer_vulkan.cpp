@@ -205,6 +205,8 @@ try
 
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
+    scheduler.Finish();
+    present_manager.WaitPresent();
     void(device.GetLogical().WaitIdle());
 }
 
@@ -408,9 +410,10 @@ void RendererVulkan::RenderAppletCaptureLayer(
             VideoCore::Capture::Layout, *applet_frame.image_view, CaptureFormat);
     }
 
+    constexpr size_t CaptureResourceSets = 3;
     scheduler.RequestOutsideRenderPassOperationContext();
-    blit_applet.DrawToFrame(device, rasterizer, &applet_frame, capture_layers, VideoCore::Capture::Layout, 1,
-                            CaptureFormat);
+    blit_applet.DrawToFrame(device, rasterizer, &applet_frame, capture_layers,
+                            VideoCore::Capture::Layout, CaptureResourceSets, CaptureFormat);
 }
 
 } // namespace Vulkan

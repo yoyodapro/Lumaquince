@@ -17,6 +17,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <utility>
 
 #include "common/assert.h"
@@ -45,6 +46,9 @@
 namespace VideoCommon {
 
 constexpr std::array<char, 8> MAGIC_NUMBER{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+constexpr std::array<char, 8> ENVIRONMENT_MAGIC{'l', 'i', 'c', 'h', 'e', 'n', 'v', '1'};
+constexpr u32 ENVIRONMENT_VERSION = 1;
+constexpr u64 MAX_ENVIRONMENT_BYTES = 64 * 1024 * 1024;
 
 constexpr size_t INST_SIZE = sizeof(u64);
 
@@ -59,6 +63,24 @@ static u64 NativeShaderHash(std::span<const u64> code) {
 
 static u64 MakeCbufKey(u32 index, u32 offset) {
     return (static_cast<u64>(index) << 32) | offset;
+}
+
+static bool CbufTraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_CBUF_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+static bool TakeMetadataLogSlot(std::atomic<u32>& count) {
+    u32 current = count.load(std::memory_order_relaxed);
+    while (current < 32) {
+        if (count.compare_exchange_weak(current, current + 1, std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Pointer-table entries share the classification map with plain constant buffer pointers.
@@ -289,8 +311,13 @@ void GenericEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
     DumpImpl(pipeline_hash, shader_hash, code, read_highest, read_lowest, initial_offset, stage);
 }
 
-void GenericEnvironment::Serialize(std::ofstream& file) const {
+void GenericEnvironment::Serialize(std::ostream& output) const {
+    std::ostringstream file(std::ios::binary);
+    file.exceptions(std::ios::failbit | std::ios::badbit);
     const u64 code_size{static_cast<u64>(CachedSizeBytes())};
+    if (!CanBeSerialized() || code_size > code.size() * sizeof(u64)) {
+        throw std::ios_base::failure("Incomplete shader environment");
+    }
     const u64 num_texture_types{static_cast<u64>(texture_types.size())};
     const u64 num_texture_pixel_formats{static_cast<u64>(texture_pixel_formats.size())};
     const u64 num_cbuf_values{static_cast<u64>(cbuf_values.size())};
@@ -335,16 +362,26 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
         file.write(reinterpret_cast<const char*>(&key), sizeof(key))
             .write(reinterpret_cast<const char*>(&type), sizeof(type));
     }
-    if (stage == Shader::Stage::Compute) {
-        file.write(reinterpret_cast<const char*>(&workgroup_size), sizeof(workgroup_size))
-            .write(reinterpret_cast<const char*>(&shared_memory_size), sizeof(shared_memory_size));
-    } else {
-        file.write(reinterpret_cast<const char*>(&sph), sizeof(sph));
-        if (stage == Shader::Stage::Geometry) {
-            file.write(reinterpret_cast<const char*>(&gp_passthrough_mask),
-                       sizeof(gp_passthrough_mask));
-        }
+    const u32 flags = (is_proprietary_driver ? 1U : 0U) | (has_hle_engine_state ? 2U : 0U);
+    file.write(reinterpret_cast<const char*>(&workgroup_size), sizeof(workgroup_size))
+        .write(reinterpret_cast<const char*>(&shared_memory_size), sizeof(shared_memory_size))
+        .write(reinterpret_cast<const char*>(&sph), sizeof(sph))
+        .write(reinterpret_cast<const char*>(&gp_passthrough_mask), sizeof(gp_passthrough_mask))
+        .write(reinterpret_cast<const char*>(&mesh_registers), sizeof(mesh_registers))
+        .write(reinterpret_cast<const char*>(&mesh_primitive_header), sizeof(mesh_primitive_header))
+        .write(reinterpret_cast<const char*>(&initial_offset), sizeof(initial_offset))
+        .write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+    const std::string payload = std::move(file).str();
+    const u64 payload_size = payload.size();
+    const u64 checksum = Common::CityHash64(payload.data(), payload.size());
+    if (payload_size > MAX_ENVIRONMENT_BYTES) {
+        throw std::ios_base::failure("Shader environment exceeds cache limit");
     }
+    output.write(ENVIRONMENT_MAGIC.data(), ENVIRONMENT_MAGIC.size())
+        .write(reinterpret_cast<const char*>(&ENVIRONMENT_VERSION), sizeof(ENVIRONMENT_VERSION))
+        .write(reinterpret_cast<const char*>(&payload_size), sizeof(payload_size))
+        .write(reinterpret_cast<const char*>(&checksum), sizeof(checksum))
+        .write(payload.data(), payload.size());
 }
 
 std::optional<u64> GenericEnvironment::TryFindSize() {
@@ -380,11 +417,58 @@ std::optional<u64> GenericEnvironment::TryFindSize() {
     return std::nullopt;
 }
 
+u32 GenericEnvironment::RecordCbufRead(const ShaderCbufRead& read) {
+    recent_cbuf_reads[recent_cbuf_next] = read;
+    recent_cbuf_next = (recent_cbuf_next + 1) % recent_cbuf_reads.size();
+    recent_cbuf_count = std::min(recent_cbuf_count + 1, recent_cbuf_reads.size());
+    cbuf_values.emplace(MakeCbufKey(read.bank, read.offset), read.value);
+
+    static std::atomic<u32> invalid_reads{};
+    static std::atomic<u32> mismatches{};
+    const bool invalid = read.status != ShaderCbufReadStatus::Valid;
+    const bool mismatch = read.raw_value && *read.raw_value != read.value;
+    if ((invalid && TakeMetadataLogSlot(invalid_reads)) ||
+        (mismatch && TakeMetadataLogSlot(mismatches))) {
+        LOG_WARNING(HW_GPU,
+                    "Shader CBuf read: program={:#x} stage={} bank={} base={:#x} "
+                    "address={:#x} offset={} size={} value={:#x} status={} "
+                    "raw_sampled={} raw={:#x}",
+                    program_base, static_cast<u32>(stage), read.bank, read.buffer_address,
+                    read.address, read.offset, read.size, read.value,
+                    ShaderCbufReadStatusName(read.status), read.raw_value.has_value(),
+                    read.raw_value.value_or(0));
+    }
+    return read.value;
+}
+
 Tegra::Texture::TICEntry GenericEnvironment::ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                                              bool via_header_index, u32 raw) {
     const auto handle{Tegra::Texture::TexturePair(raw, via_header_index)};
     const u32 index{Tegra::Texture::TextureHeaderIndex(handle.first, tic_limit,
                                                        gpu_memory->UsesNativeTiling())};
+    if (index > tic_limit) {
+        static std::atomic<u32> invalid_tics{};
+        if (TakeMetadataLogSlot(invalid_tics)) {
+            std::string history;
+            for (size_t i = 0; i < recent_cbuf_count; ++i) {
+                const auto& read = recent_cbuf_reads[(recent_cbuf_next + recent_cbuf_reads.size() -
+                                                    recent_cbuf_count + i) % recent_cbuf_reads.size()];
+                history += fmt::format(
+                    " [bank={} base={:#x} address={:#x} offset={} size={} value={:#x} "
+                    "status={} raw_sampled={} raw={:#x}]",
+                    read.bank, read.buffer_address, read.address, read.offset, read.size,
+                    read.value, ShaderCbufReadStatusName(read.status), read.raw_value.has_value(),
+                    read.raw_value.value_or(0));
+            }
+            LOG_WARNING(HW_GPU,
+                        "Invalid shader TIC: program={:#x} stage={} raw={:#x} "
+                        "decoded_tic={:#x} decoded_tsc={:#x} index={} limit={} pool={:#x} "
+                        "native={} via_header={} recent_cbuf_reads={}",
+                        program_base, static_cast<u32>(stage), raw, handle.first, handle.second,
+                        index, tic_limit, tic_addr, gpu_memory->UsesNativeTiling(), via_header_index,
+                        history);
+        }
+    }
     ASSERT(index <= tic_limit);
     const GPUVAddr descriptor_addr{tic_addr + index * sizeof(Tegra::Texture::TICEntry)};
     Tegra::Texture::TICEntry entry;
@@ -856,14 +940,14 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
-    const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
-    ASSERT(cbuf.enabled);
-    u32 value{};
-    if (cbuf_offset < cbuf.size) {
-        value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
-    }
-    cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), value);
-    return value;
+    const auto& buffers = maxwell3d->state.shader_stages[stage_index].const_buffers;
+    return RecordCbufRead(ReadShaderCbuf(
+        *gpu_memory, buffers.size(),
+        [&](u32 bank) {
+            const auto& buffer = buffers[bank];
+            return ShaderCbufBinding{buffer.address, buffer.size, buffer.enabled};
+        },
+        cbuf_index, cbuf_offset, CbufTraceEnabled()));
 }
 
 std::optional<Shader::ReplaceConstant> GraphicsEnvironment::GetReplaceConstBuffer(u32 bank,
@@ -966,14 +1050,14 @@ std::optional<u32> ComputeEnvironment::ReadTrapGuardConstant(u32 bank, u32 offse
 
 u32 ComputeEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
     const auto& qmd{kepler_compute->launch_description};
-    ASSERT(((qmd.const_buffer_enable_mask.Value() >> cbuf_index) & 1) != 0);
-    const auto& cbuf{qmd.const_buffer_config[cbuf_index]};
-    u32 value{};
-    if (cbuf_offset < cbuf.size) {
-        value = gpu_memory->Read<u32>(cbuf.Address() + cbuf_offset);
-    }
-    cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), value);
-    return value;
+    return RecordCbufRead(ReadShaderCbuf(
+        *gpu_memory, qmd.const_buffer_config.size(),
+        [&](u32 bank) {
+            const auto& buffer = qmd.const_buffer_config[bank];
+            return ShaderCbufBinding{buffer.Address(), buffer.size.Value(),
+                                     ((qmd.const_buffer_enable_mask.Value() >> bank) & 1) != 0};
+        },
+        cbuf_index, cbuf_offset, CbufTraceEnabled()));
 }
 
 Shader::TextureType ComputeEnvironment::ReadTextureType(u32 handle) {
@@ -1040,7 +1124,36 @@ u32 ComputeEnvironment::ReadViewportTransformState() {
     return viewport_transform_state;
 }
 
-void FileEnvironment::Deserialize(std::ifstream& file) {
+void FileEnvironment::Deserialize(std::istream& input) {
+    // Each environment is independently framed so truncated or corrupt state cannot reach
+    // translation, and a future ABI cannot be mistaken for this one in an offline dump.
+    std::array<char, 8> magic{};
+    u32 version{};
+    u64 payload_size{};
+    u64 expected_checksum{};
+    input.read(magic.data(), magic.size())
+        .read(reinterpret_cast<char*>(&version), sizeof(version))
+        .read(reinterpret_cast<char*>(&payload_size), sizeof(payload_size))
+        .read(reinterpret_cast<char*>(&expected_checksum), sizeof(expected_checksum));
+    if (!input || magic != ENVIRONMENT_MAGIC || version != ENVIRONMENT_VERSION ||
+        payload_size == 0 || payload_size > MAX_ENVIRONMENT_BYTES) {
+        throw std::ios_base::failure("Invalid shader environment header");
+    }
+    std::string payload(static_cast<size_t>(payload_size), '\0');
+    input.read(payload.data(), payload.size());
+    if (!input || Common::CityHash64(payload.data(), payload.size()) != expected_checksum) {
+        throw std::ios_base::failure("Truncated or corrupt shader environment");
+    }
+    std::istringstream file(std::move(payload), std::ios::binary);
+    file.exceptions(std::ios::failbit | std::ios::badbit);
+    texture_types.clear();
+    texture_pixel_formats.clear();
+    cbuf_values.clear();
+    storage_pointer_types.clear();
+    cbuf_replacements.clear();
+    cbuf_word_cache.clear();
+    handle_cache.clear();
+    track_cache.clear();
     u64 code_size{};
     u64 num_texture_types{};
     u64 num_texture_pixel_formats{};
@@ -1063,7 +1176,18 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
         .read(reinterpret_cast<char*>(&read_highest), sizeof(read_highest))
         .read(reinterpret_cast<char*>(&viewport_transform_state), sizeof(viewport_transform_state))
         .read(reinterpret_cast<char*>(&stage), sizeof(stage));
-    code.resize(Common::DivCeil(code_size, sizeof(u64)));
+    if (code_size == 0 || code_size % sizeof(u64) != 0 || code_size > payload_size ||
+        read_lowest > read_highest || u64{read_highest} - read_lowest + sizeof(u64) != code_size ||
+        read_lowest % sizeof(u64) != 0 ||
+        static_cast<u32>(stage) > static_cast<u32>(Shader::Stage::Mesh) ||
+        num_texture_types > payload_size / (sizeof(u32) + sizeof(Shader::TextureType)) ||
+        num_texture_pixel_formats > payload_size / (sizeof(u32) + sizeof(Shader::TexturePixelFormat)) ||
+        num_cbuf_values > payload_size / (sizeof(u64) + sizeof(u32)) ||
+        num_storage_pointer_types > payload_size / (sizeof(u64) + sizeof(u8)) ||
+        num_cbuf_replacement_values > payload_size / (sizeof(u64) + sizeof(Shader::ReplaceConstant))) {
+        throw std::ios_base::failure("Invalid shader environment sizes or stage");
+    }
+    code.resize(code_size / sizeof(u64));
     file.read(reinterpret_cast<char*>(code.data()), code_size);
     for (size_t i = 0; i < num_texture_types; ++i) {
         u32 key;
@@ -1100,19 +1224,21 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
             .read(reinterpret_cast<char*>(&value), sizeof(value));
         cbuf_replacements.emplace(key, value);
     }
-    if (stage == Shader::Stage::Compute) {
-        file.read(reinterpret_cast<char*>(&workgroup_size), sizeof(workgroup_size))
-            .read(reinterpret_cast<char*>(&shared_memory_size), sizeof(shared_memory_size));
-        initial_offset = Shader::Ampere::HasNativeAddressMap(code) ? sizeof(sph) : 0;
-    } else {
-        file.read(reinterpret_cast<char*>(&sph), sizeof(sph));
-        initial_offset = sizeof(sph);
-        if (stage == Shader::Stage::Geometry) {
-            file.read(reinterpret_cast<char*>(&gp_passthrough_mask), sizeof(gp_passthrough_mask));
-        }
+    u32 flags{};
+    file.read(reinterpret_cast<char*>(&workgroup_size), sizeof(workgroup_size))
+        .read(reinterpret_cast<char*>(&shared_memory_size), sizeof(shared_memory_size))
+        .read(reinterpret_cast<char*>(&sph), sizeof(sph))
+        .read(reinterpret_cast<char*>(&gp_passthrough_mask), sizeof(gp_passthrough_mask))
+        .read(reinterpret_cast<char*>(&mesh_registers), sizeof(mesh_registers))
+        .read(reinterpret_cast<char*>(&mesh_primitive_header), sizeof(mesh_primitive_header))
+        .read(reinterpret_cast<char*>(&initial_offset), sizeof(initial_offset))
+        .read(reinterpret_cast<char*>(&flags), sizeof(flags));
+    if (flags > 3 || initial_offset % sizeof(u64) != 0 || initial_offset >= code_size ||
+        static_cast<u64>(file.tellg()) != payload_size) {
+        throw std::ios_base::failure("Invalid shader environment state");
     }
-    // Native programs fold bank 1 reads as they did when they were built.
-    is_proprietary_driver = texture_bound == 2 || Shader::Ampere::HasNativeAddressMap(code);
+    is_proprietary_driver = (flags & 1) != 0;
+    has_hle_engine_state = (flags & 2) != 0;
 }
 
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
@@ -1147,7 +1273,7 @@ bool FileEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset, 
 }
 
 u64 FileEnvironment::ReadInstruction(u32 address) {
-    if (address < read_lowest || address > read_highest) {
+    if (address < read_lowest || address > read_highest || address % sizeof(u64) != 0) {
         throw Shader::LogicError("Out of bounds address {}", address);
     }
     return code[(address - read_lowest) / sizeof(u64)];
@@ -1282,11 +1408,17 @@ void LoadPipelines(
         }
         u32 num_envs{};
         file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+        if (num_envs == 0 || num_envs > Maxwell::MaxShaderProgram) {
+            throw std::ios_base::failure("Invalid pipeline shader count");
+        }
         std::vector<FileEnvironment> envs(num_envs);
         for (FileEnvironment& env : envs) {
             env.Deserialize(file);
         }
         if (envs.front().ShaderStage() == Shader::Stage::Compute) {
+            if (num_envs != 1) {
+                throw std::ios_base::failure("Invalid compute pipeline shader count");
+            }
             load_compute(file, std::move(envs.front()));
         } else {
             load_graphics(file, std::move(envs));

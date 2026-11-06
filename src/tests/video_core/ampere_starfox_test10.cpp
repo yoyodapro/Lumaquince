@@ -616,7 +616,8 @@ TEST_CASE("Star Fox uniform TXD maps uniform banks and preserves partial masks",
                 Translation translated;
                 translated.registers.fill(0xdeadbeef);
                 const u32 mapped = uniform < 22 ? uniform + 216
-                                   : uniform < 28 ? uniform + 218 : 214 + (uniform & 1);
+                                   : uniform < 28 ? uniform + 218
+                                                  : 216 - ((uniform - 24) & ~3U) + uniform - 28;
                 translated.registers[mapped] = 0x24681234;
                 translated.registers[20] = 0x3e800000;
                 translated.registers[21] = 0x3f400000;
@@ -653,15 +654,56 @@ TEST_CASE("Star Fox uniform TXD rejects unsupported modes and reserved register 
         auto instruction = CapturedGradients[1];
         SetBits(instruction, change[0], change[1], change[2]);
         const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+        CAPTURE(change);
         CHECK_FALSE(lowered);
         CHECK(lowered.instructions.empty());
     }
-    auto instruction = CapturedGradients[1];
-    SetBits(instruction, 40, 6, 28);
-    SetBits(instruction, 24, 8, 212);
-    const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
-    CHECK_FALSE(lowered);
-    CHECK(lowered.instructions.empty());
+    // Cross the reserved boundary, a shadow quartet, or the end of the guest register bank.
+    for (const u32 coordinates : {211U, 215U, 254U}) {
+        auto instruction = CapturedGradients[1];
+        SetBits(instruction, 40, 6, 28);
+        SetBits(instruction, 24, 8, coordinates);
+        const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+        CAPTURE(coordinates);
+        CHECK_FALSE(lowered);
+        CHECK(lowered.instructions.empty());
+    }
+}
+
+TEST_CASE("Star Fox uniform TXD separates high uniform handles from shadowed coordinates",
+          "[video_core][ampere][starfox_test10]") {
+    for (const u32 uniform : {28U, 29U}) {
+        auto instruction = CapturedGradients[1];
+        SetBits(instruction, 40, 6, uniform);
+        SetBits(instruction, 24, 8, 212);
+        const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+        CAPTURE(uniform);
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        Translation translated;
+        translated.registers.fill(0xdeadbeef);
+        translated.registers[212 + uniform - 28] = 0x24681234;
+        // Guest R212..214 occupy the shadow bank; UR28/29 occupy the same physical range.
+        translated.registers[256 + 212] = 0x3e800000;
+        translated.registers[256 + 213] = 0x3f400000;
+        translated.registers[256 + 214] = 5;
+        const Translation::Vector derivatives{0x3d800000, 0x3e000000, 0x3e800000, 0x3f000000};
+        for (u32 i = 0; i < derivatives.size(); ++i)
+            translated.registers[16 + i] = derivatives[i];
+        auto expected = translated.registers;
+        for (u32 i = 0; i < 4; ++i)
+            expected[i < 2 ? 18 + i : 16 + i - 2] = translated.sample[i];
+        translated.Run(lowered);
+        CHECK(translated.textures == 1);
+        CHECK(translated.handle == 0x24681234);
+        CHECK(translated.coordinates == Translation::Vector{0x3e800000, 0x3f400000, 0x40a00000});
+        CHECK(translated.derivatives == derivatives);
+        CHECK(translated.texture_info.type == Shader::TextureType::ColorArray2D);
+        for (u32 reg = 0; reg < 246; ++reg)
+            CHECK(translated.registers[reg] == expected[reg]);
+        for (u32 reg = 256; reg < 512; ++reg)
+            CHECK(translated.registers[reg] == expected[reg]);
+    }
 }
 
 TEST_CASE("Star Fox dual predicate LUT snapshots aliased inputs and execution predicates",

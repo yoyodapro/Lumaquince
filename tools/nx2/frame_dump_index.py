@@ -90,6 +90,8 @@ def main():
             header = entry
         elif entry.get("kind") == "summary":
             summary = entry
+        elif entry.get("kind") == "draw":
+            continue  # Shader-slot metadata, not an image/readback.
         else:
             entries.append(entry)
     info = (f"frame {header.get('frame', '?')} at {header.get('seconds', '?')} s · "
@@ -97,6 +99,7 @@ def main():
             f"{summary.get('draws', '?')} draws · {summary.get('dispatches', '?')} dispatches · "
             f"{summary.get('bytes', 0) / 2**20:.1f} MiB"
             + (" · TRUNCATED at the size cap" if summary.get("truncated") else "")
+            + (" · DRAW METADATA TRUNCATED" if summary.get("draw_metadata_truncated") else "")
             + ("" if summary else " · no summary line: the capture did not finish"))
     page = (f"<!doctype html><meta charset=utf-8><title>Frame dump</title><style>{STYLE}</style>"
             f"<h1>Frame dump: {html.escape(info)}</h1>"

@@ -62,6 +62,10 @@ public:
         return unique_identifier;
     }
 
+    u64 MapSerial() const noexcept {
+        return map_serial.load(std::memory_order_acquire);
+    }
+
     /// Binds a renderer to the memory manager.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
 

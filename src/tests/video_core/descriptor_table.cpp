@@ -137,12 +137,8 @@ TEST_CASE("Descriptor limits clear exposed slots after shrink and growth", "[des
     }
     for (const u32 limit :
          {std::numeric_limits<u32>::max(), std::numeric_limits<u32>::max() - 0x1000}) {
-        VideoCommon::DescriptorTable<u64> table;
-        table.Refresh(0x1000, limit);
-        CHECK(table.Read(memory, 0).second);
-        table.Invalidate();
-        CHECK(table.Read(memory, 0).second);
-        CHECK_FALSE(table.Read(memory, 0).second);
+        // Check the arithmetic without attempting to allocate billions of entries.
+        CHECK(VideoCommon::DescriptorTable<u64>::CapacityForLimit(limit) == 0x1'0000'0000ULL);
     }
 }
 
@@ -317,8 +313,9 @@ TEST_CASE("Descriptor Debug poisoning touches only the current addressable range
     std::ranges::fill(table.LiveBoundIds(), poison);
     REQUIRE(table.bound_ids.capacity() == 0);
 
+    REQUIRE(table.Synchronize(0x1000, 255));
     REQUIRE(table.Synchronize(0x1000, 127));
-    REQUIRE(table.bound_ids.size() == 524289);
+    REQUIRE(table.bound_ids.size() == 256);
     REQUIRE(table.LiveBoundIds().size() == 128);
     std::ranges::fill(table.bound_ids, untouched);
     REQUIRE(table.Read(memory, 127).second);

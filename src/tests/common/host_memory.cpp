@@ -4,9 +4,14 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <optional>
+#include <type_traits>
+#include <utility>
 #include <catch2/catch_test_macros.hpp>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -21,12 +26,151 @@ static constexpr size_t BACKING_SIZE = 4_GiB;
 static constexpr auto PERMS = Common::MemoryPermission::ReadWrite;
 static constexpr auto HEAP = false;
 
+static_assert(std::is_nothrow_move_constructible_v<HostMemory>);
+static_assert(std::is_nothrow_move_assignable_v<HostMemory>);
+
+static void CheckMovedFrom(HostMemory& memory) {
+    REQUIRE(memory.BackingBasePointer() == nullptr);
+    REQUIRE(memory.VirtualBasePointer() == nullptr);
+    REQUIRE(memory.VirtualSize() == 0);
+    memory.ForgetContents();
+}
+
 static bool MapsSingleGuestPages() {
 #ifdef _WIN32
     return true;
 #else
     return sysconf(_SC_PAGESIZE) == 0x1000;
 #endif
+}
+
+#ifdef _WIN32
+static void CheckRegionState(void* address, DWORD state) {
+    MEMORY_BASIC_INFORMATION information{};
+    REQUIRE(VirtualQuery(address, &information, sizeof(information)) != 0);
+    REQUIRE(information.State == state);
+}
+
+TEST_CASE("HostMemory: Moving fallback backing transfers sole ownership", "[common]") {
+    std::optional<HostMemory> destination;
+    u8* address{};
+    {
+        HostMemory source(128_KiB, 1ULL << 60);
+        REQUIRE(source.VirtualBasePointer() == nullptr);
+        address = source.BackingBasePointer();
+        REQUIRE(address != nullptr);
+        address[64_KiB] = 42;
+        source.MarkUsed(64_KiB, 1);
+        destination.emplace(std::move(source));
+        CheckMovedFrom(source);
+    }
+    CheckRegionState(address, MEM_COMMIT);
+    REQUIRE(destination->BackingBasePointer() == address);
+    REQUIRE(address[64_KiB] == 42);
+    destination->ForgetContents();
+    destination->ClearBackingRegion(64_KiB, 1, 0);
+    REQUIRE(address[64_KiB] == 0);
+    destination.reset();
+    CheckRegionState(address, MEM_FREE);
+}
+
+TEST_CASE("HostMemory: Fallback move assignment releases its old allocation", "[common]") {
+    std::optional<HostMemory> destination(std::in_place, 64_KiB, 1ULL << 60);
+    REQUIRE(destination->VirtualBasePointer() == nullptr);
+    u8* const previous = destination->BackingBasePointer();
+    REQUIRE(previous != nullptr);
+    u8* address{};
+    {
+        HostMemory source(128_KiB, 1ULL << 60);
+        REQUIRE(source.VirtualBasePointer() == nullptr);
+        address = source.BackingBasePointer();
+        REQUIRE(address != nullptr);
+        address[128_KiB - 1] = 93;
+        *destination = std::move(source);
+        CheckMovedFrom(source);
+        CheckRegionState(previous, MEM_FREE);
+    }
+    CheckRegionState(address, MEM_COMMIT);
+    auto& same = *destination;
+    *destination = std::move(same);
+    REQUIRE(destination->BackingBasePointer() == address);
+    REQUIRE(address[128_KiB - 1] == 93);
+    destination.reset();
+    CheckRegionState(address, MEM_FREE);
+}
+
+TEST_CASE("HostMemory: Failed arena initialization releases fallback backing", "[common]") {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        void* address{};
+        {
+            // Exceeds the Windows user address space, forcing the private fallback.
+            HostMemory memory(64_KiB, 1ULL << 60);
+            REQUIRE(memory.VirtualBasePointer() == nullptr);
+            address = memory.BackingBasePointer();
+            REQUIRE(address != nullptr);
+            memory.BackingBasePointer()[0] = 17;
+        }
+        MEMORY_BASIC_INFORMATION information{};
+        REQUIRE(VirtualQuery(address, &information, sizeof(information)) != 0);
+        REQUIRE(information.State == MEM_FREE);
+    }
+}
+#endif
+
+TEST_CASE("HostMemory: Moving an arena preserves its mappings", "[common]") {
+    std::optional<HostMemory> destination;
+    u8* backing{};
+    u8* mapped{};
+    {
+        HostMemory source(128_KiB, VIRTUAL_SIZE);
+        REQUIRE(source.VirtualBasePointer() != nullptr);
+        source.Map(0, 0, 64_KiB, PERMS, HEAP);
+        source.Map(64_KiB, 0, 64_KiB, PERMS, HEAP);
+        backing = source.BackingBasePointer();
+        mapped = source.VirtualBasePointer();
+        mapped[0] = 37;
+        destination.emplace(std::move(source));
+        CheckMovedFrom(source);
+    }
+    REQUIRE(destination->BackingBasePointer() == backing);
+    REQUIRE(destination->VirtualBasePointer() == mapped);
+    REQUIRE(mapped[64_KiB] == 37);
+    destination->Unmap(64_KiB, 64_KiB, HEAP);
+    destination->Map(64_KiB, 64_KiB, 64_KiB, PERMS, HEAP);
+    mapped[64_KiB] = 81;
+    REQUIRE(backing[64_KiB] == 81);
+    REQUIRE(mapped[0] == 37);
+}
+
+TEST_CASE("HostMemory: Arena move assignment and self move preserve ownership", "[common]") {
+    HostMemory destination(64_KiB, VIRTUAL_SIZE);
+    REQUIRE(destination.VirtualBasePointer() != nullptr);
+    destination.Map(0, 0, 64_KiB, PERMS, HEAP);
+#ifdef _WIN32
+    u8* const previous = destination.BackingBasePointer();
+#endif
+    u8* mapped{};
+    {
+        HostMemory source(128_KiB, VIRTUAL_SIZE);
+        REQUIRE(source.VirtualBasePointer() != nullptr);
+        source.Map(0, 64_KiB, 64_KiB, PERMS, HEAP);
+        mapped = source.VirtualBasePointer();
+        mapped[0] = 65;
+        destination = std::move(source);
+        CheckMovedFrom(source);
+#ifdef _WIN32
+        CheckRegionState(previous, MEM_FREE);
+#endif
+    }
+    auto& same = destination;
+    destination = std::move(same);
+    REQUIRE(destination.VirtualBasePointer() == mapped);
+    REQUIRE(mapped[0] == 65);
+    REQUIRE(destination.BackingBasePointer()[64_KiB] == 65);
+    destination.Unmap(0, 64_KiB, HEAP);
+    destination.Map(0, 0, 64_KiB, PERMS, HEAP);
+    mapped[0] = 91;
+    REQUIRE(destination.BackingBasePointer()[0] == 91);
 }
 
 TEST_CASE("HostMemory: Initialize and deinitialize", "[common]") {

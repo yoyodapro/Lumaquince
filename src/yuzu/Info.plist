@@ -17,25 +17,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <key>CFBundleGetInfoString</key>
     <string></string>
     <key>CFBundleIconFile</key>
-    <string>lichii.icns</string>
+    <string>lumaquince.icns</string>
     <key>CFBundleIconName</key>
-    <string>lichii</string>
+    <string>Lumaquince</string>
     <key>CFBundleIdentifier</key>
-    <string>com.yuzu-emu.yuzu</string> <!-- May be required by 3rd party ext -->
+    <string>org.lumaquince.Lumaquince</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleLongVersionString</key>
-    <string></string>
+    <string>0.1.0 Preview 1</string>
     <key>CFBundleName</key>
-    <string>lichii</string>
+    <string>Lumaquince</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string></string>
+    <string>0.1.0</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleVersion</key>
-    <string></string>
+    <string>0.1.0</string>
     <key>CSResourcesFileMapped</key>
     <true/>
     <key>CFBundleDocumentTypes</key>

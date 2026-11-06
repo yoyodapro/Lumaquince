@@ -64,7 +64,8 @@ struct RangeSet<AddressType>::RangeSetImpl {
 
     template <typename Func>
     void ForEachInRange(AddressType base_addr, size_t size, Func&& func) const {
-        if (m_ranges_set.empty()) {
+        // Empty intervals are not valid search keys for the interval set's ordering.
+        if (m_ranges_set.empty() || size == 0) {
             return;
         }
         const AddressType start_address = base_addr;

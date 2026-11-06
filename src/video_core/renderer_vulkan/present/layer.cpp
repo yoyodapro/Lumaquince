@@ -164,6 +164,10 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     *out_descriptor_set = descriptor_sets[image_index];
 }
 
+void Layer::MarkDrawUsed(size_t image_index) {
+    resource_ticks[image_index] = scheduler.CurrentTick();
+}
+
 void Layer::CreateDescriptorPool(const Device& device) {
     descriptor_pool = CreateWrappedDescriptorPool(device, image_count, image_count);
 }
@@ -204,16 +208,18 @@ void Layer::CreateRawImages(const Device& device, const Tegra::FramebufferConfig
 
 void Layer::RefreshResources(const Device& device, const Tegra::FramebufferConfig& framebuffer) {
     if (framebuffer.width == raw_width && framebuffer.height == raw_height &&
-        framebuffer.pixel_format == pixel_format && !raw_images.empty()) {
+        framebuffer.stride == raw_stride && framebuffer.pixel_format == pixel_format &&
+        !raw_images.empty()) {
         return;
     }
 
+    ReleaseRawImages();
     raw_width = framebuffer.width;
     raw_height = framebuffer.height;
+    raw_stride = framebuffer.stride;
     pixel_format = framebuffer.pixel_format;
     anti_alias.emplace<std::monostate>();
 
-    ReleaseRawImages();
     CreateStagingBuffer(device, framebuffer);
     CreateRawImages(device, framebuffer);
 }
@@ -245,7 +251,12 @@ void Layer::SetAntiAliasPass(const Device& device) {
 #ifdef HAS_RESHADE
 void Layer::SetPostProcessPass(const Device& device, bool is_applet) {
     if (is_applet) {
-        post_process.reset();
+        if (post_process.has_value()) {
+            for (const u64 tick : resource_ticks) {
+                scheduler.Wait(tick);
+            }
+            post_process.reset();
+        }
         return;
     }
     const VkExtent2D render_area{
@@ -342,6 +353,12 @@ void Layer::UpdateDescriptorSet(const Device& device, VkImageView image_view, Vk
 }
 
 void Layer::UpdateRawImage(const Tegra::FramebufferConfig& framebuffer, size_t image_index) {
+    if (!buffer.IsHostCoherent()) {
+        // Flush covers the allocation, whose slots can share noncoherent atoms.
+        for (const u64 tick : resource_ticks) {
+            scheduler.Wait(tick);
+        }
+    }
     const std::span<u8> mapped_span = buffer.Mapped();
 
     const u64 image_offset = GetRawImageOffset(framebuffer, image_index);

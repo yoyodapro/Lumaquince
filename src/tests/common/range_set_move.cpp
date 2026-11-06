@@ -4,6 +4,23 @@
 #include "common/range_sets.h"
 #include "common/range_sets.inc"
 
+TEST_CASE("Empty range queries visit no GPU-owned spans", "[range_move][range_set]") {
+    Common::RangeSet<u64> ranges;
+    ranges.Add(0x1000, 0x1000);
+    ranges.Add(0x4000, 0x800);
+    for (u64 address : {0ULL, 0x1000ULL, 0x1800ULL, 0x2000ULL, 0x3000ULL, 0x4800ULL}) {
+        INFO("empty query at " << address);
+        ranges.ForEachInRange(address, 0, [](u64, u64) { FAIL("Empty query visited a range"); });
+        CHECK_FALSE(ranges.Intersects(address, 0));
+    }
+    u64 bytes{};
+    ranges.ForEachInRange(0x1800, 0x3000, [&](u64 begin, u64 end) {
+        REQUIRE(begin < end);
+        bytes += end - begin;
+    });
+    CHECK(bytes == 0x1000);
+}
+
 TEST_CASE("Moved cache range sets are empty, reusable and self-assignable", "[range_move]") {
     Common::RangeSet<u64> first;
     first.Add(100, 10);

@@ -922,6 +922,7 @@ void CopyBufferToImage(vk::CommandBuffer cmdbuf, VkBuffer src_buffer, VkImage im
     // TODO: Move this to another API
     cmdbuf.PipelineBarrier(
             VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
             VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -1665,7 +1666,12 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext = nullptr,
                 .srcAccessMask = 0,
-                .dstAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
                 .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -1714,7 +1720,7 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
 
         cmdbuf.CopyImageToBuffer(src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy_buffer,
                                  vk_in_copies);
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                        0, WRITE_BARRIER, nullptr, middle_in_barrier);
 
         cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -1723,7 +1729,7 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
         // actual layout (VUID-vkCmdCopyBufferToImage-dstImageLayout-00180).
         cmdbuf.CopyBufferToImage(copy_buffer, dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                  vk_out_copies);
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                        0, {}, {}, post_barriers);
     });
 }
@@ -2561,7 +2567,12 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                 .pNext = nullptr,
                 .srcAccessMask = 0,
-                .dstAccessMask = 0,
+                .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
                 .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -2596,8 +2607,7 @@ void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk_copies);
         cmdbuf.PipelineBarrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
                 0, nullptr, nullptr, post_barriers);
     });
 }
@@ -2686,7 +2696,12 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
                         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
                         .pNext = nullptr,
                         .srcAccessMask = 0,
-                        .dstAccessMask = 0,
+                        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                         VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
                         .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -2710,7 +2725,8 @@ void TextureCacheRuntime::CopyImageMSAA(Image& dst, Image& src,
                                           VK_REMAINING_ARRAY_LAYERS},
                     },
                 };
-                cmdbuf.PipelineBarrier(attachment_stage | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                cmdbuf.PipelineBarrier(attachment_stage | VK_PIPELINE_STAGE_TRANSFER_BIT |
+                                           vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
                                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, nullptr,
                                        pre_barriers);
                 cmdbuf.CopyImage(shadow_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image,

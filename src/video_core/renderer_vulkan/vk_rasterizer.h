@@ -126,6 +126,7 @@ public:
     void SignalSyncPoint(u32 value) override;
     void SignalReference() override;
     void ReleaseFences(bool force = true) override;
+    void FlushQueryResults(DAddr addr, u64 size) override;
     void FlushAndInvalidateRegion(
         DAddr addr, u64 size, VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void WaitForIdle() override;
@@ -195,7 +196,7 @@ private:
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
     void SubmitNx2ListCopies();
 
-    void UpdateDynamicStates();
+    void UpdateDynamicStates(const GraphicsPipeline* pipeline);
 
     void HandleTransformFeedback();
 
@@ -221,8 +222,10 @@ private:
     void UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                     const GraphicsPipeline& pipeline);
+    void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs,
+                                const GraphicsPipeline& pipeline);
     void UpdateFrontFace(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateStencilOp(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);

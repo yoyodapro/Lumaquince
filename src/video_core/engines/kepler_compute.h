@@ -66,6 +66,13 @@ public:
     /// Binds a rasterizer to this engine.
     void BindRasterizer(VideoCore::RasterizerInterface* rasterizer);
 
+    [[nodiscard]] bool MayWriteMemory(u32 method) const {
+        if (method >= native_plain_methods.size()) {
+            return true;
+        }
+        return native_mode ? !native_plain_methods[method] : execution_mask[method];
+    }
+
     /// The channel's MME data RAM, shared with its 3D engine.
     void SetNativeDataRam(std::array<u32, 0xc00>* data_ram) { native_data_ram = data_ram; }
     void SetNativeMacroMode(MacroEngine* shared_macro, std::span<u32> positions, NativeMacroContext* context = nullptr) {
@@ -247,6 +254,8 @@ public:
     bool IsNativeMode() const { return native_mode; }
     bool ProcessGameDlss(u64 program_id, u64 native_key);
     void TraceDlssContract(u64 native_key, bool warn_unvalidated = true);
+    /// Whether the dispatch being run belongs to an active game DLSS evaluation.
+    bool IsDlssDispatch() const { return native_mode && dlss_chain.active; }
 
     /// GPU thread split with macros on its front half (gpu_split.h, EDEN_NX2_SPLIT=2), called by
     /// the front instead of CallMethod for native compute engines: runs their macros and macro

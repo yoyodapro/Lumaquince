@@ -13,8 +13,12 @@
 
 namespace VideoCommon {
 
-inline constexpr u32 OpenGLPipelineCacheVersion = 48;
-inline constexpr u32 VulkanPipelineCacheVersion = 52;
+// v09 mesh point/line translation uses a separate namespace for private validation.
+// OpenGL still rejects task/mesh stages; its translation and cache format are unchanged.
+inline constexpr u32 OpenGLPipelineCacheVersion = 52;
+inline constexpr u32 VulkanPipelineCacheVersion = 57;
+// The opaque driver blob does not contain serialized shader environments.
+inline constexpr u32 VulkanDriverPipelineCacheVersion = 52;
 
 // Official Eglantine (cache version 18 at c0cb3325) and this fork (a different version) both
 // used <shader dir>/<title>/vulkan.bin and vulkan_pipelines.bin. Each build deletes a file

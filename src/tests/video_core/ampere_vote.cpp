@@ -13,8 +13,8 @@ TEST_CASE("Ampere uniform vote writes mapped uniform registers", "[video_core][a
     const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
     constexpr std::array mappings{
         std::pair{15U, 231U}, std::pair{16U, 232U}, std::pair{21U, 237U},
-        std::pair{22U, 240U}, std::pair{27U, 245U}, std::pair{28U, 214U},
-        std::pair{29U, 215U}, std::pair{62U, 214U}, std::pair{63U, 255U},
+        std::pair{22U, 240U}, std::pair{27U, 245U}, std::pair{28U, 212U},
+        std::pair{29U, 213U}, std::pair{62U, 214U}, std::pair{63U, 255U},
     };
 
     for (const auto& [target, mapped] : mappings) {

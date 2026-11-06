@@ -197,7 +197,9 @@ void RasterizerOpenGL::Clear(u32 layer_count) {
     SyncStencilTestState();
 
     std::scoped_lock lock{texture_cache.mutex};
-    texture_cache.UpdateRenderTargets(true);
+    // OpenGL clear coverage also depends on draw-buffer mapping and backend masks.
+    // Preserve contents until that backend has a resolved clear plan of its own.
+    texture_cache.UpdateRenderTargets(false);
     state_tracker.BindFramebuffer(texture_cache.GetFramebuffer()->Handle());
     SyncViewport();
     if (regs.clear_control.use_scissor) {

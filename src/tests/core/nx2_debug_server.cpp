@@ -7,9 +7,12 @@
 #include <boost/asio.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/scope_exit.h"
+#include "core/core.h"
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/gpu_split.h"
 
 namespace {
 
@@ -25,6 +28,41 @@ Handlers EchoHandlers() {
 }
 
 } // Anonymous namespace
+
+TEST_CASE("Debug split spin policy validates the whole request before applying it",
+          "[core][nx2_debug_server][spin_budgets]") {
+    VideoCommon::GpuSplit split;
+    const auto call = [&](const json& params) { return Core::Nx2Debug::SplitSpinBudgets(split, params); };
+    const json defaults{{"front", 16384}, {"capacity", 4096}, {"back", 8192}};
+    REQUIRE(call(json::object())["current"] == defaults);
+    REQUIRE(call({{"front", 0}, {"capacity", 1}, {"back", 0}})["previous"] == defaults);
+    const auto saved = split.GetSpinBudgets();
+    for (const char* text : {R"({"front":-1})", R"({"front":16385})", R"({"capacity":4097})",
+                            R"({"back":8193})", R"({"front":1.0})", R"({"front":true})",
+                            R"({"front":"1"})", R"({"front":null})", R"({"front":[]})",
+                            R"({"front":18446744073709551615})", R"({"front":1e30})",
+                            R"({"capacity":2,"front":-1})", R"({"back":2,"typo":1})",
+                            R"({"reset":false})", R"({"reset":1})", R"({"reset":true,"back":1})",
+                            "[]", "null", "0"}) {
+        CAPTURE(text);
+        REQUIRE_THROWS(call(json::parse(text)));
+        REQUIRE(split.GetSpinBudgets() == saved);
+    }
+    const auto partial = call({{"capacity", 4096}});
+    REQUIRE(partial["current"] == json{{"front", 0}, {"capacity", 4096}, {"back", 0}});
+    REQUIRE(call({{"reset", true}})["current"] == defaults);
+    REQUIRE(call(defaults)["current"] == defaults);
+    REQUIRE_FALSE(split.SetSpinBudgets({16385, 0, 0}));
+    REQUIRE_FALSE(split.SetSpinBudgets({0, 4097, 0}));
+    REQUIRE_FALSE(split.SetSpinBudgets({0, 0, 8193}));
+    REQUIRE(call(json::object())["current"] == defaults);
+
+    const Handlers handlers{{"split_spin_budgets", call}};
+    REQUIRE(json::parse(Core::Nx2Debug::HandleRequest(
+                handlers, R"({"id":2,"method":"split_spin_budgets","params":{"front":true}})"))
+                .contains("error"));
+    REQUIRE(call(json::object())["current"] == defaults);
+}
 
 TEST_CASE("Debug server endpoints are loopback only", "[core][nx2_debug_server]") {
     std::string error;
@@ -44,6 +82,52 @@ TEST_CASE("Debug server endpoints are loopback only", "[core][nx2_debug_server]"
     REQUIRE_FALSE(Core::Nx2Debug::ParseEndpoint("127.0.0.1:", error));
     REQUIRE_FALSE(Core::Nx2Debug::ParseEndpoint("127.0.0.1:70000", error));
     REQUIRE_FALSE(Core::Nx2Debug::ParseEndpoint("12ab", error));
+}
+
+TEST_CASE("Debug frame times measure intervals and retain the ring tail", "[core][nx2_debug_server]") {
+    auto& ring = Core::g_nx2_present_times_ns;
+    SCOPE_EXIT {
+        for (auto& timestamp : ring) {
+            timestamp.store(0);
+        }
+    };
+    const auto read = [](u64 after, u64 end_ns) {
+        return Core::Nx2Debug::ReadFrameTimes(0, after, 1, end_ns, 60.0);
+    };
+    REQUIRE(read(0, 1)["frames"] == 0);
+    ring[1] = 1;
+    REQUIRE(read(1, 1)["mean_ms"] == 0.0);
+    ring[2] = 16'666'668;
+    ring[3] = 50'000'001;
+    const auto mixed = read(3, 50'000'001);
+    REQUIRE(mixed["frames"] == 2);
+    REQUIRE(mixed["mean_ms"] == 25.0);
+    REQUIRE(mixed["p50_ms"] == 25.0);
+    REQUIRE(mixed["fps"] == 40.0);
+    REQUIRE(mixed["vsync_buckets"]["1"] == 0.5);
+    REQUIRE(mixed["vsync_buckets"]["2"] == 0.5);
+    REQUIRE(mixed["intervals_ms"] == json::array({16.7, 33.3}));
+    REQUIRE(mixed["stutters"] == 0);
+    REQUIRE(mixed["truncated"] == false);
+    ring[4] = 150'000'001;
+    REQUIRE(read(4, 150'000'001)["stutters"] == 1);
+    // An overwritten slot must not make an interval across the missing sample.
+    ring[2] = 200'000'001;
+    REQUIRE(read(3, 50'000'001)["frames"] == 0);
+    REQUIRE(read(3, 50'000'001)["truncated"] == true);
+    for (u64 frame = 1; frame <= 5000; ++frame) {
+        ring[frame % ring.size()] = frame * 1'000'000;
+    }
+    const auto overflow = read(5000, 5'000'000'000);
+    REQUIRE(overflow["frames"] == ring.size() - 1);
+    REQUIRE(overflow["mean_ms"] == 1.0);
+    REQUIRE(overflow["truncated"] == true);
+    REQUIRE(overflow["intervals_ms"].size() == 120);
+    // A counted present whose timestamp store is pending still holds the previous lap's value.
+    ring[5000 % ring.size()] = (5000 - ring.size()) * 1'000'000;
+    const auto pending = read(5000, 5'000'000'000);
+    REQUIRE(pending["frames"] == ring.size() - 2);
+    REQUIRE(pending["max_ms"] == 1.0);
 }
 
 TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {

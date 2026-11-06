@@ -1,0 +1,9 @@
+<!-- SPDX-FileCopyrightText: 2026 Lumaquince contributors -->
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+ <rect x="8" y="8" width="240" height="240" rx="56" fill="#152e32"/>
+ <path d="M128 71c-21-24-65-9-75 31-16 61 23 112 75 119 52-7 91-58 75-119-10-40-54-55-75-31z" fill="#eebf45"/>
+ <path d="M128 74c-5-17-4-31 3-43" fill="none" stroke="#73512c" stroke-width="11" stroke-linecap="round"/>
+ <path d="M130 53c17-29 43-35 62-27-8 25-30 39-62 27z" fill="#69b77d"/>
+ <path d="M75 118c-8 30 4 58 27 70" fill="none" stroke="#ffe6a0" stroke-width="11" stroke-linecap="round"/>
+</svg>

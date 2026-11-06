@@ -274,7 +274,7 @@ void RemoveVulkanDriverPipelineCache(u64 program_id) {
     const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
     const auto shader_cache_folder_path = shader_cache_dir / fmt::format("{:016x}", program_id);
     const auto target_file = VideoCommon::VersionedPipelineCachePath(
-        shader_cache_folder_path, "vulkan_pipelines", VideoCommon::VulkanPipelineCacheVersion);
+        shader_cache_folder_path, "vulkan_pipelines", VideoCommon::VulkanDriverPipelineCacheVersion);
 
     if (!Common::FS::Exists(target_file)) {
         return;

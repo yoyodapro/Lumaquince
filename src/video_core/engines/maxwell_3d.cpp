@@ -19,6 +19,7 @@
 #include "video_core/dirty_flags.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/maxwell_3d_front_state.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
@@ -866,6 +867,7 @@ struct Maxwell3D::FrontState {
     /// then can it have a deferred instanced draw to issue at the end of a macro.
     bool draw_pending{true};
     bool skip_same{}; ///< SkipSameValueWrites() && FrontSkipSame(), read once
+    Maxwell3DFrontDrawState draw_state;
 };
 
 namespace {
@@ -934,6 +936,7 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         std::memcpy(front->shadow.data(), shadow_state.reg_array.data(), sizeof(front->shadow));
         front->control = shadow_state.shadow_ram_control;
         front->skip_same = SkipSameValueWrites() && FrontSkipSame();
+        front->draw_state.mode = draw_manager.draw_state.draw_mode;
         front->executing_macro = executing_macro;
         front->parameters = std::move(macro_params);
         macro_params.clear();
@@ -962,6 +965,14 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     if (method == MAXWELL3D_REG_INDEX(shadow_ram_control) && FrontVerifyEnabled()) [[unlikely]] {
         fs.control_writes[fs.control_count++ % fs.control_writes.size()] = {
             argument, static_cast<u32>(fs.control), from_macro ? 2U : 1U};
+    }
+    fs.draw_state.Observe(method, value);
+    if (execution_mask[method] &&
+        fs.draw_state.CanSkip(method, fs.regs[method], value, shadow_kept, fs.skip_same)) {
+        if (Profile::Enabled()) [[unlikely]] {
+            Profile::Add(Profile::Counter::SameValueWrites, 1);
+        }
+        return;
     }
     if (!execution_mask[method]) {
         // Nothing would change on the back: CallMethod and ConsumeSinkImpl skip same-value state
@@ -1067,7 +1078,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
                 fs.shadow[method] = last;
             }
             fs.regs[method] = last;
+            fs.draw_state.Observe(method, last);
         }
+        // ProcessInlineIndexMultiData returns before touching the draw mode for zero words.
         fs.draw_pending = true;
     } else {
         // CallMethod for each word, macro uploads among them (load_mme.instruction). A word may
@@ -1084,6 +1097,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
             } else if (fs.control == Regs::ShadowRamControl::Replay) {
                 value = fs.shadow[method];
             }
+            fs.draw_state.Observe(method, value);
             fs.regs[method] = value;
             if (!execution_mask[method]) {
                 continue;
@@ -1209,6 +1223,11 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             },
             VideoCommon::DrainSite::MacroDmaFlush);
     }
+    split.Run(
+        [this, source, read_bytes] {
+            VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source, read_bytes);
+        },
+        VideoCommon::DrainSite::MacroDmaFlush);
     u32 changed{};
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));

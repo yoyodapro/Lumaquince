@@ -90,7 +90,7 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 // set. nx2_switches.txt holds "NAME=VALUE" lines, one per line, '#' comments. A variable already
 // in the real environment always wins, so a launcher script can still override one run; between
 // files the later one wins, so the copy next to the executable (shipped with the build) can be
-// overridden by %APPDATA%\eden\nx2_switches.txt without editing the one that gets replaced.
+// overridden by %APPDATA%\Lumaquince\nx2_switches.txt without editing the one that gets replaced.
 static void ParseSwitchFile(const std::filesystem::path& path,
                             std::map<std::string, std::string>& entries) {
     std::ifstream file{path};
@@ -193,8 +193,9 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Init settings params
-    QCoreApplication::setOrganizationName(QStringLiteral("eden"));
-    QCoreApplication::setApplicationName(QStringLiteral("Lichii"));
+    QCoreApplication::setOrganizationName(QStringLiteral("Lumaquince"));
+    QCoreApplication::setApplicationName(QStringLiteral("Lumaquince"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0-preview.1"));
 
     // Increases the maximum open file limit.
     // TODO: This should be common to all frontends.
@@ -246,7 +247,7 @@ int main(int argc, char* argv[]) {
 
     // Fix the Wayland appId. This needs to match the name of the .desktop file without the .desktop
     // suffix.
-    QGuiApplication::setDesktopFileName(QStringLiteral("io.github.zortos293.lichii"));
+    QGuiApplication::setDesktopFileName(QStringLiteral("lumaquince"));
 #endif
 
     auto rounding_policy = GetHighDpiRoundingPolicy();

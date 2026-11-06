@@ -78,6 +78,21 @@ std::vector<u8> Reference(const Nx2Picture& picture, u32 width, u32 height, u32 
                       planes.data(), strides.data()) == static_cast<int>(height));
     return bytes;
 }
+
+std::vector<u8> Nv12Pixels(std::span<const u8> bytes, u32 width, u32 height, u32 pitch) {
+    // swscale may write SIMD padding, whose contents can differ for cached and fresh scalers.
+    // Compare every image sample, excluding only the bytes outside each plane's visible width.
+    std::vector<u8> pixels;
+    for (u32 y = 0; y < height; ++y) {
+        const auto row = bytes.subspan(y * pitch, width);
+        pixels.insert(pixels.end(), row.begin(), row.end());
+    }
+    for (u32 y = 0; y < (height + 1) / 2; ++y) {
+        const auto row = bytes.subspan((height + y) * pitch, ((width + 1) / 2) * 2);
+        pixels.insert(pixels.end(), row.begin(), row.end());
+    }
+    return pixels;
+}
 } // namespace
 
 TEST_CASE("NX2 video interleaves planar chroma and copies complete odd NV12 rows",
@@ -145,16 +160,19 @@ TEST_CASE("NX2 video refreshes cached scaler ranges from full to limited and bac
     for (const AVColorRange range : {AVCOL_RANGE_JPEG, AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG}) {
         picture.frame->GetFrame()->color_range = range;
         const auto expected = Reference(picture, width, height, pitch);
-        std::vector<u8> actual(expected.size(), 0xcd);
+        std::vector<u8> actual(expected.size() + 16, 0xcd);
         decoder.Render(picture, Nx2PictureFormat::Nv12, width, height, pitch, pitch * height,
-                       actual);
-        REQUIRE(actual == expected);
+                       std::span<u8>{actual}.first(expected.size()));
+        REQUIRE(std::all_of(actual.begin() + expected.size(), actual.end(),
+                            [](u8 byte) { return byte == 0xcd; }));
+        const auto pixels = Nv12Pixels(actual, width, height, pitch);
+        REQUIRE(pixels == Nv12Pixels(expected, width, height, pitch));
         if (first_full.empty()) {
-            first_full = actual;
+            first_full = pixels;
         } else if (range == AVCOL_RANGE_MPEG) {
-            REQUIRE(actual != first_full);
+            REQUIRE(pixels != first_full);
         } else {
-            REQUIRE(actual == first_full);
+            REQUIRE(pixels == first_full);
         }
     }
 }
@@ -167,14 +185,20 @@ TEST_CASE("NX2 video keeps full-range planar frames on the scaler path",
         auto picture = Picture(16, 16, format);
         picture.frame->GetFrame()->color_range = AVCOL_RANGE_JPEG;
         const auto expected = Reference(picture, 16, 16, 32);
-        std::vector<u8> actual(expected.size(), 0xcd);
-        decoder.Render(picture, Nx2PictureFormat::Nv12, 16, 16, 32, 32 * 16, actual);
-        REQUIRE(actual == expected);
+        std::vector<u8> actual(expected.size() + 16, 0xcd);
+        decoder.Render(picture, Nx2PictureFormat::Nv12, 16, 16, 32, 32 * 16,
+                       std::span<u8>{actual}.first(expected.size()));
+        REQUIRE(std::all_of(actual.begin() + expected.size(), actual.end(),
+                            [](u8 byte) { return byte == 0xcd; }));
+        REQUIRE(Nv12Pixels(actual, 16, 16, 32) == Nv12Pixels(expected, 16, 16, 32));
         if (format == AV_PIX_FMT_YUVJ420P) {
             picture.frame->GetFrame()->color_range = AVCOL_RANGE_UNSPECIFIED;
             std::fill(actual.begin(), actual.end(), 0xcd);
-            decoder.Render(picture, Nx2PictureFormat::Nv12, 16, 16, 32, 32 * 16, actual);
-            REQUIRE(actual == expected);
+            decoder.Render(picture, Nx2PictureFormat::Nv12, 16, 16, 32, 32 * 16,
+                           std::span<u8>{actual}.first(expected.size()));
+            REQUIRE(std::all_of(actual.begin() + expected.size(), actual.end(),
+                                [](u8 byte) { return byte == 0xcd; }));
+            REQUIRE(Nv12Pixels(actual, 16, 16, 32) == Nv12Pixels(expected, 16, 16, 32));
         }
     }
 }
@@ -205,15 +229,19 @@ TEST_CASE("NX2 full-range NV12 preserves same-size chroma and converts resized f
     for (const AVColorRange range : {AVCOL_RANGE_JPEG, AVCOL_RANGE_MPEG, AVCOL_RANGE_JPEG}) {
         frame->color_range = range;
         expected = Reference(picture, 8, 8, pitch);
-        actual.assign(expected.size(), 0xcd);
-        decoder.Render(picture, Nx2PictureFormat::Nv12, 8, 8, pitch, pitch * 8, actual);
-        REQUIRE(actual == expected);
+        actual.assign(expected.size() + 16, 0xcd);
+        decoder.Render(picture, Nx2PictureFormat::Nv12, 8, 8, pitch, pitch * 8,
+                       std::span<u8>{actual}.first(expected.size()));
+        REQUIRE(std::all_of(actual.begin() + expected.size(), actual.end(),
+                            [](u8 byte) { return byte == 0xcd; }));
+        const auto pixels = Nv12Pixels(actual, 8, 8, pitch);
+        REQUIRE(pixels == Nv12Pixels(expected, 8, 8, pitch));
         if (first_full.empty()) {
-            first_full = actual;
+            first_full = pixels;
         } else if (range == AVCOL_RANGE_MPEG) {
-            REQUIRE(actual != first_full);
+            REQUIRE(pixels != first_full);
         } else {
-            REQUIRE(actual == first_full);
+            REQUIRE(pixels == first_full);
         }
     }
 }

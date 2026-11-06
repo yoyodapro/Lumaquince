@@ -439,6 +439,7 @@ u32 BufferCacheRuntime::GetStorageBufferAlignment() const {
 }
 
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept {
+    multi_range_buffers.TickFrame(scheduler);
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
         if (scheduler.IsFree(it->LastUsageTick())) {
             it->ResetUsageTracking();
@@ -519,6 +520,16 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     if (src_buffer == staging_pool.StreamBuf() && can_reorder_upload) {
         scheduler.RecordWithUploadBuffer([src_buffer, dst_buffer, vk_copies](
                                              vk::CommandBuffer, vk::CommandBuffer upload_cmdbuf) {
+            static constexpr VkMemoryBarrier UPLOAD_BARRIER{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            };
+            // Unconsumed destinations can receive several uploads before submission.
+            // The scheduler's final upload barrier does not order those writes with each other.
+            upload_cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, UPLOAD_BARRIER);
             upload_cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);
         });
         return;
@@ -650,12 +661,16 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
         ReserveNullBuffer();
         vk_buffer = *null_buffer;
     }
+    if (!index_binding.Update(vk_buffer, vk_offset, vk_index_type, scheduler.RecordingEpoch())) {
+        return;
+    }
     scheduler.Record([vk_buffer, vk_offset, vk_index_type](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindIndexBuffer(vk_buffer, vk_offset, vk_index_type);
     });
 }
 
 void BufferCacheRuntime::BindHostUint8IndexBuffer(std::span<const u8> indices) {
+    index_binding.Invalidate();
     const auto staging = staging_pool.Request(indices.size() * sizeof(u16), MemoryUsage::Upload);
     u16* const widened = reinterpret_cast<u16*>(staging.mapped_span.data());
     std::ranges::transform(indices, widened, [](u8 index) -> u16 { return index == 0xff ? 0xffff : index; });
@@ -665,6 +680,7 @@ void BufferCacheRuntime::BindHostUint8IndexBuffer(std::span<const u8> indices) {
 }
 
 void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
+    index_binding.Invalidate();
     if (count == 0) {
         ReserveNullBuffer();
         scheduler.Record([this](vk::CommandBuffer cmdbuf) {

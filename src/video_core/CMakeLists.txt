@@ -14,11 +14,13 @@ if(LIBVA_FOUND)
 endif()
 
 add_library(video_core STATIC
+    buffer_cache/async_download_ranges.h
     buffer_cache/buffer_base.h
     buffer_cache/buffer_cache_base.h
     buffer_cache/buffer_cache.cpp
     buffer_cache/buffer_cache.h
     buffer_cache/memory_tracker_base.h
+    buffer_cache/storage_binding_cache.h
     buffer_cache/usage_tracker.h
     buffer_cache/virtual_range_cache.h
     buffer_cache/word_manager.h
@@ -28,6 +30,7 @@ add_library(video_core STATIC
     cdma_pusher.h
     compatible_formats.cpp
     compatible_formats.h
+    continuous_range_cache.h
     control/channel_state.cpp
     control/channel_state.h
     control/channel_state_cache.cpp
@@ -56,6 +59,7 @@ add_library(video_core STATIC
     engines/kepler_memory.h
     engines/maxwell_3d.cpp
     engines/maxwell_3d.h
+    engines/maxwell_3d_front_state.h
     engines/maxwell_dma.cpp
     engines/maxwell_dma.h
     engines/puller.cpp
@@ -121,6 +125,8 @@ add_library(video_core STATIC
     present.h
     pte_kind.h
     query_cache/bank_base.h
+    query_cache/bank_bookkeeping.h
+    query_cache/copy_batches.h
     query_cache/query_base.h
     query_cache/query_cache_base.h
     query_cache/query_cache.h
@@ -167,6 +173,8 @@ add_library(video_core STATIC
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
     renderer_vulkan/pipeline_helper.h
+    renderer_vulkan/index_binding_state.h
+    renderer_vulkan/frame_dump_draw_metadata.h
     renderer_vulkan/pipeline_statistics.cpp
     renderer_vulkan/pipeline_statistics.h
     renderer_vulkan/renderer_vulkan.h
@@ -254,6 +262,7 @@ add_library(video_core STATIC
     shader_cache.h
     shader_environment.cpp
     shader_environment.h
+    shader_cbuf_read.h
     shader_handle_program.h
     shader_notify.cpp
     shader_notify.h
@@ -281,6 +290,7 @@ add_library(video_core STATIC
     texture_cache/render_targets.h
     texture_cache/samples_helper.h
     texture_cache/texture_cache.cpp
+    texture_cache/clear_plan.h
     texture_cache/texture_cache.h
     texture_cache/texture_cache_base.h
     texture_cache/types.h
@@ -296,6 +306,8 @@ add_library(video_core STATIC
     textures/texture.h
     textures/workers.cpp
     textures/workers.h
+    textures/unswizzle_worker.cpp
+    textures/unswizzle_worker.h
     transform_feedback.cpp
     transform_feedback.h
     video_core.cpp

@@ -39,6 +39,7 @@
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/game_dlss_status.h"
 #include "video_core/surface.h"
+#include "video_core/texture_cache/clear_plan.h"
 #include "video_core/texture_cache/descriptor_table.h"
 #include "video_core/texture_cache/image_base.h"
 #include "video_core/texture_cache/image_info.h"
@@ -46,6 +47,7 @@
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/types.h"
 #include "video_core/textures/texture.h"
+#include "video_core/textures/unswizzle_worker.h"
 
 namespace Tegra {
 namespace Control {
@@ -262,8 +264,12 @@ public:
     bool RescaleRenderTargets();
 
     /// Update bound render targets and upload memory if necessary
-    /// @param is_clear True when the render targets are being used for clears
+    /// @param is_clear Bind only; the backend must resolve and prepare its clear before use.
     void UpdateRenderTargets(bool is_clear);
+
+    void PrepareRenderTargetsForClear(const ClearPlan& clear);
+
+    void FinishRenderTargetsClear(const ClearPlan& recorded_clear);
 
     /// Find a framebuffer with the currently bound render targets
     /// UpdateRenderTargets should be called before this
@@ -503,7 +509,7 @@ private:
         ImageId, const ImageViewInfo& view_info);
 
     /// Returns true if the current clear parameters clear the whole image of a given image view
-    [[nodiscard]] bool IsFullClear(ImageViewId id);
+    [[nodiscard]] ClearImageCoverage GetClearImageCoverage(ImageViewId id, u32 attachment);
 
     [[nodiscard]] std::pair<u32, u32> PrepareDmaImage(ImageId dst_id, GPUVAddr base_addr,
                                                       bool mark_as_modified);
@@ -551,14 +557,15 @@ private:
 
     /// Applies EDEN_NX2_TC_EXPECTED_MIB / EDEN_NX2_TC_CRITICAL_MIB and logs the thresholds.
     void ApplyThresholdOverrides(bool log = true);
+    void LogThresholds() const;
 
     /// The CPU address an image at gpu_addr is keyed by: its backing, or a fixed stand-in.
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
-    /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
-    /// skip the upload of a new target the clear overwrites whole.
+    /// Defer new-target uploads while binding a clear. CpuModified survives until backend proof.
     bool clearing_render_targets = false;
+    bool clear_preparation_deferred = false;
     bool is_rescaling = false;
     u64 total_used_memory = 0;
     u64 minimum_memory;
@@ -629,6 +636,7 @@ private:
 
     Common::ScratchBuffer<u8> swizzle_data_buffer;
     Common::ScratchBuffer<u8> unswizzle_data_buffer;
+    Tegra::Texture::UnswizzleWorker unswizzle_worker;
 
     u64 modification_tick = 0;
     u64 frame_tick = 0;

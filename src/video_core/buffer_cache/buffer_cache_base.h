@@ -35,6 +35,7 @@
 #include "common/slot_vector.h"
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
+#include "video_core/buffer_cache/storage_binding_cache.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/delayed_destruction_ring.h"
@@ -180,6 +181,7 @@ public:
 
 template <class P>
 class BufferCache : public VideoCommon::ChannelSetupCaches<BufferCacheChannelInfo> {
+    friend struct BufferCacheTestAccess;
     // Page size for caching purposes.
     // This is unrelated to the CPU page size and it can be changed as it seems optimal.
 #ifdef YUZU_LEGACY
@@ -572,11 +574,14 @@ private:
     /// Downloads the GPU-written data of several buffers with one wait for the GPU.
     void DownloadBuffersMemory(std::span<const BufferId> buffer_ids);
 
+    void DownloadRangesMemory(std::span<const std::pair<DAddr, u64>> ranges);
+
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
     [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
                                                bool native_pointer = false,
-                                               bool table_pointer = false) const;
+                                               bool table_pointer = false,
+                                               bool mapping_size = true) const;
 
     void TraceTablePointer(bool compute, size_t stage, size_t ssbo_index, u32 cbuf_index,
                            u32 cbuf_offset, u32 indirect_offset, GPUVAddr holder,
@@ -734,6 +739,7 @@ private:
     };
     Common::LeastRecentlyUsedCache<LRUItemParams> lru_cache;
     VirtualRangeCache virtual_ranges;
+    mutable StorageBindingCache storage_bindings;
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
     u64 frame_tick = 0;

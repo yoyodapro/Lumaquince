@@ -57,6 +57,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <random>
+#include <utility>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -258,21 +259,24 @@ private:
                 }
             }
             Coalesce(0, virtual_size);
+            placeholders.clear();
+            placeholder_host_pointers.clear();
         }
         if (virtual_base) {
-            if (!VirtualFree(virtual_base, 0, MEM_RELEASE)) {
+            if (!VirtualFree(std::exchange(virtual_base, nullptr), 0, MEM_RELEASE)) {
                 LOG_CRITICAL(HW_Memory, "Failed to free virtual memory");
             }
         }
         if (backing_base) {
-            if (!pfn_UnmapViewOfFile2(process, backing_base, MEM_PRESERVE_PLACEHOLDER)) {
+            void* const address = std::exchange(backing_base, nullptr);
+            if (!pfn_UnmapViewOfFile2(process, address, MEM_PRESERVE_PLACEHOLDER)) {
                 LOG_CRITICAL(HW_Memory, "Failed to unmap backing memory placeholder");
             }
-            if (!VirtualFreeEx(process, backing_base, 0, MEM_RELEASE)) {
+            if (!VirtualFreeEx(process, address, 0, MEM_RELEASE)) {
                 LOG_CRITICAL(HW_Memory, "Failed to free backing memory");
             }
         }
-        if (!CloseHandle(backing_handle)) {
+        if (backing_handle && !CloseHandle(std::exchange(backing_handle, nullptr))) {
             LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
         }
     }
@@ -938,7 +942,7 @@ HostMemory::HostMemory(size_t backing_size_, size_t virtual_size_)
 HostMemory::~HostMemory() {
 #ifdef _WIN32
     if (fallback_buffer) {
-        VirtualFree(backing_base, backing_size, MEM_RELEASE);
+        VirtualFree(backing_base, 0, MEM_RELEASE);
     }
 #else
     if (fallback_buffer) {
@@ -947,9 +951,32 @@ HostMemory::~HostMemory() {
 #endif
 }
 
-HostMemory::HostMemory(HostMemory&&) noexcept = default;
+HostMemory::HostMemory(HostMemory&& other) noexcept {
+    Swap(other);
+}
 
-HostMemory& HostMemory::operator=(HostMemory&&) noexcept = default;
+HostMemory& HostMemory::operator=(HostMemory&& other) noexcept {
+    if (this != &other) {
+        HostMemory incoming{std::move(other)};
+        Swap(incoming);
+    }
+    return *this;
+}
+
+void HostMemory::Swap(HostMemory& other) noexcept {
+    using std::swap;
+    swap(backing_size, other.backing_size);
+    swap(virtual_size, other.virtual_size);
+#if !(defined(__OPENORBIS__) || defined(__managarm__))
+    swap(impl, other.impl);
+#endif
+    swap(backing_base, other.backing_base);
+    swap(virtual_base, other.virtual_base);
+    swap(virtual_base_offset, other.virtual_base_offset);
+    swap(granules, other.granules);
+    swap(num_granules, other.num_granules);
+    swap(fallback_buffer, other.fallback_buffer);
+}
 
 void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms, bool separate_heap) {
 #if !(defined(__OPENORBIS__) || defined(__managarm__))

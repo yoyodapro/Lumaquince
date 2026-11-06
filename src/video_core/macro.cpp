@@ -1430,13 +1430,12 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
                         for (GPUVAddr page = source & ~GPUVAddr{0xfff}; page < source + read_bytes; page += 0x1000) {
                             if (const auto device = memory.GpuToCpuAddress(page)) {
-                                VideoCommon::Nx2Profile::DmaReadPages().insert(*device >> 12);
+                                VideoCommon::Nx2Profile::AddDmaReadPage(*device >> 12);
                             }
                         }
                     }
-                    // Accurate GPU mode holds report and semaphore writes in the query cache until a
-                    // fence: write them out, or occlusion predicates read stale values. The split only
-                    // runs with immediate payload writes, and the query cache belongs to its back.
+                    // Publish reports before reading occlusion predicates. Query caches belong to
+                    // the split's back; its front handles this through FrontDmaRead.
                     const bool owns_caches = !VideoCommon::GpuSplit::Get().Active() ||
                                              VideoCommon::GpuSplit::OnBackThread();
                     if (owns_caches && VideoCommon::QueryDma::TraceEnabled() &&
@@ -1445,8 +1444,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                         VideoCommon::QueryDma::Trace(memory, maxwell3d.Rasterizer(), method, address,
                                                      source, read_bytes);
                     }
-                    if (!VideoCommon::GpuSplit::Get().Active()) {
-                        memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::QueryCache);
+                    if (owns_caches) {
+                        VideoCommon::QueryDma::FlushPending(memory, maxwell3d.Rasterizer(), source,
+                                                          read_bytes);
                     }
                     if (memory.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
                         memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);

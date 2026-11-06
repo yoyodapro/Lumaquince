@@ -12,8 +12,10 @@
 
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
+#include "video_core/buffer_cache/uniform_stream_reuse.h"
 #include "video_core/buffer_cache/usage_tracker.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/renderer_vulkan/index_binding_state.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_multi_range_buffer.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -205,6 +207,10 @@ public:
         return last_stream_uniform;
     }
 
+    [[nodiscard]] VideoCommon::UniformStreamReuse<StreamUniformRef>& UniformReuse() noexcept {
+        return uniform_reuse;
+    }
+
     /// Adds `ref` to the descriptor payload exactly as BindMappedUniformBuffer did when it made
     /// the allocation (it is the very same call). The caller guarantees the allocation is still
     /// live: made on the scheduler tick that is current now, so the staging pool has not recycled
@@ -268,8 +274,10 @@ public:
         if (format == VideoCore::Surface::PixelFormat::Invalid) {
             format = VideoCore::Surface::PixelFormat::R8_UNORM;
         }
-        guest_descriptor_queue.AddTexelBuffer(buffer.View(offset, size, format),
-                                              buffer.DeviceAddress(), offset, size,
+        const VkBufferView view = guest_descriptor_queue.UsesDescriptorBuffer()
+                                      ? VK_NULL_HANDLE
+                                      : buffer.View(offset, size, format);
+        guest_descriptor_queue.AddTexelBuffer(view, buffer.DeviceAddress(), offset, size,
                                               TexelBufferFormat(format));
     }
 
@@ -318,6 +326,8 @@ private:
     VkDeviceSize multi_range_total{};
 
     StreamUniformRef last_stream_uniform{};
+    VideoCommon::UniformStreamReuse<StreamUniformRef> uniform_reuse;
+    IndexBindingState index_binding;
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
