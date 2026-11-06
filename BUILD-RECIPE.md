@@ -1,4 +1,9 @@
-# Windows release build recipe
+# Quality 03 Windows release build recipe
+
+The GitHub release is **`v0.1.0-preview.1-quality.3`**, titled **Lumaquince Quality 03 — Renderer and pipeline update**. The validated executables retain the internal version **`0.1.0-preview.1`**; they are not the original Preview 1 binaries. Identify this build by the Quality 03 release tag, compiled-source commit `bcbe1db80b66c33deb2fc9e96fffbd1a9229dd91` and executable checksums in VALIDATION.md. No executable was rebuilt just to change its displayed version.
+
+The release archive is **`Lumaquince-quality-03-complete.zip`**, containing **`Lumaquince-quality-03/`**. Its `source/` directory preserves the exact compiled source. Updated documentation at the package root and in `windows/` is a release-record overlay; historical documentation inside `source/` remains part of the frozen compiler-source snapshot. A later public documentation commit does not change the binary identity.
+
 
 The matching project source is in `source`. Dependency source, applicable patches,
 producer recipes and notices are in `dependency-sources`. Read `VALIDATION.md` and
@@ -27,7 +32,7 @@ runtime. `-SkipTests` means compilation only and does not qualify a release.
 `-ConfigureOnly` stops after configuration. On a suitable native test environment,
 omit `-SkipTests` or explicitly run CTest after compilation.
 
-The release configuration is Release with `ENABLE_LTO=ON`, `YUZU_TESTS=ON`,
+The release uses production NONE mode. The configuration is Release with `ENABLE_LTO=ON`, `YUZU_TESTS=ON`,
 `BUILD_TESTING=ON`, `DYNARMIC_TESTS=OFF`, `ZLIB_BUILD_TESTING=OFF`, `YUZU_CMD=ON`,
 `YUZU_ROOM=OFF`, `YUZU_ROOM_STANDALONE=OFF`, bundled Qt/FFmpeg/SDL3 enabled,
 `VulkanHeaders_FORCE_BUNDLED=ON`, `VulkanUtilityLibraries_FORCE_BUNDLED=ON`,

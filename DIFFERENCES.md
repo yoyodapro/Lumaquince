@@ -11,7 +11,51 @@ The descriptions below separate inherited facilities, changes retained from the 
 
 The comparison is against the source snapshots used for this preview. Upstream development can move independently; this is not a claim that current upstream branches lack every listed change.
 
-See the packaged [VALIDATION.md](VALIDATION.md) for exact build, check, dependency and package-review results for Lumaquince 0.1.0-preview.1.
+See the packaged [VALIDATION.md](VALIDATION.md) for exact build, check, dependency and package-review results for the Quality 03 release (whose internal application version remains 0.1.0-preview.1).
+
+## Quality 03 additions since the public preview
+
+These additions include both the unpublished Quality 02 changes and the later worker/pipeline ports. The compiled source is `bcbe1db80b66c33deb2fc9e96fffbd1a9229dd91`. All changes below are implementation and synthetic-test claims; this new build has not been gameplay-tested.
+
+### Resource ownership and renderer state
+
+- Prepare GPU-owned uniform bytes before binding graphics and compute descriptors, including mixed direct/staged uniform banks. Read back only the GPU-owned spans, preserve newer CPU writes, and retain the clean-resource fast path.
+- Reconcile GPU-produced texture handles, sampler/image descriptors and storage pointers before the CPU decodes draw or dispatch bindings. Feedback checks use each draw's current sampled views even when descriptor-table addresses are unchanged.
+- Distinguish device-memory translation-cache owners across manager destruction and reconstruction, preventing a reused address from inheriting an earlier manager's block-read cache.
+- Apply consistent topology and primitive-restart rules to pipeline creation and dynamic state. Stage changes, including mesh/ordinary transitions, update state even when guest topology is unchanged; task/mesh stages are not mistaken for tessellation.
+- Extend read-only storage-table bindings beyond the previous 64 MiB cap within mapped and device-supported reach, up to 1 GiB. Preserve alignment/page-padding bounds, reject discontinuous backing prefixes, and use the actual OpenGL block-size limit. Writable-pool caps remain unchanged.
+- Preserve fence-flagged query reports until the real GPU fence completes, including payload-only, non-async release, semi-flush and direct-flush paths. This fixes report lifetime and publication; the inherited bounded sample-discard policy is still present.
+
+### Shader accesses and synchronization
+
+- Cover constant and uniform LOP3 operand forms in the register-pressure/shadow handling, retaining aligned uniform reservation and existing SHF support.
+- Lower 64-bit and 128-bit storage loads/stores to consecutive 32-bit operations when vector alignment cannot be established. The existing atomic path is retained.
+- Publish compute writes before indirect-command and graphics consumers. Replace the affected wait-for-idle event ordering with an explicit memory dependency.
+- Publish GPU writes to mapped host-readable buffers before completion waits and CPU access. Batched and mixed staged/mapped readbacks retain clipping, exact GPU-owned ranges and protection for newer CPU bytes; the mapped path does not allocate an extra readback staging buffer.
+
+### Pipeline preparation and worker lifetime
+
+- Retain warm graphics pipelines while driver memory permits and the cache contains at most 16,384 entries; resume conservative age trimming when either condition fails. The count is an age-trim trigger, not a hard memory ceiling.
+- Give native asynchronous graphics emission owned inputs and shared completion state, with once-only work, exception handling, capture release and multiwaiter completion. Destruction waits before referenced state can disappear. Native draws still wait for a required pipeline.
+- Prebuild eligible previously encountered cached environments with bounded ownership: at most 64 captured entries, a 16 MiB input budget and one or two background workers. Driver parallel-build workarounds remain active. Reload stops and joins the old generation before resetting reservations and admitting new work.
+- Publish cancelled-worker completion under the same queue mutex used by waiting threads, closing a missed-wakeup window while preserving accepted-work accounting and cancellation ownership.
+- Add focused production-path fixtures for ownership, mixed readback, cancellation, pipeline lifecycle, reload reuse and storage alignment. Correct test setup accounting and retain a successfully observed GPU split wait transition without changing production split scheduling.
+
+| Adaptation | Upstream reference and reviewed commit |
+|---|---|
+| LOP3 operand pressure entries | [Lichii PR 241](https://github.com/zortos293/Lichii/pull/241), `d25d06b588fee6fed11a16617090d707987c4756` |
+| Read-only storage-pool reach | [Lichii PR 351 by jpkto](https://github.com/zortos293/Lichii/pull/351), `6aa59375402096a4ca4bd0a3ebfcac37f6d24877` |
+| Query-report lifetime | [Lichii PR 337](https://github.com/zortos293/Lichii/pull/337), `0f0720d07ddeeb52b0f59826b2e79b6b03302ab3` |
+| Storage alignment and GPU ordering | [Lichii PR 295](https://github.com/zortos293/Lichii/pull/295), `18cfe8556341a0b969a7ae28b71fb541632a90ca` |
+| Cancelled-worker wakeups | [Lichii PR 290](https://github.com/zortos293/Lichii/pull/290), `c9bdbaa38ee522e3124ae05eb56c74be15cf780a` |
+| Owned native graphics emission | [Lichii PR 184](https://github.com/zortos293/Lichii/pull/184), `5f6066b26bb56fc0d5f2925464979bf6cdc56666` |
+| Mapped-host reads and bounded cached prebuild | Selected portions of [Lichii PR 194](https://github.com/zortos293/Lichii/pull/194), `b06d1818eeec9ab13f0df9822b58aef50a601483` |
+
+These are reviewed adaptations with local ownership, coherency and lifetime changes, not a wholesale merge of an upstream branch. Original source copyright and license notices remain. Lumaquince builds on Lichii, Eglantine, Eden, yuzu and Sudachi; see [UPSTREAM.md](UPSTREAM.md) for the broader attribution.
+
+The exact-build validation passed 900 native cases, 206 required commands and 178 emitted SPIR-V validators. First-use native draws wait for their pipeline; background preparation never discovers unseen shaders. The inherited bounded preload policy, two-session history, two-minute cache save, timing controls and diagnostic defaults are preserved. See [pipeline ownership and prebuild limits](docs/nx2/async-native-pipelines.md). The background prebuilder handles eligible cached entries skipped by foreground preload; with preload-all enabled, there may be no skipped work for it to prepare.
+
+The latest accepted Quality 02 predecessor received qualitative feedback that the sky beams were gone and materials looked normal. That observation belongs to the earlier executable built from source `a52eada6b0a7e02b162db5bd0467e8afd1e0e927` and does not qualify the new Quality 03 build. Other reported issues are unresolved or unverified on this candidate, not assertions that each symptom is still visible after those earlier improvements.
 
 ## Inherited facilities
 
@@ -46,7 +90,7 @@ The combined source includes the following targeted shader changes:
 - Depth-comparison descriptors retain floating-point image typing even if an invalid descriptor advertises an integer format.
 - Vulkan mesh output supports point and line topologies as well as triangles, including index arity, mapping stride and fixed, default or authored point size.
 
-These are not a complete fix for GPU-selected texture handles. In particular, a per-fragment or loop-dependent handle read from GPU storage cannot generally be resolved once per draw on the CPU. Invalid depth-comparison and numeric image-type bindings remain in the tested predecessor. Correcting CAS or a packed half-float load must not be described as fixing those separate binding errors.
+These are not a complete fix for GPU-selected texture handles. In particular, a per-fragment or loop-dependent handle read from GPU storage cannot generally be resolved once per draw on the CPU. An older tested predecessor reported invalid depth-comparison and numeric image-type bindings; their status on Quality 03 remains unverified. Correcting CAS or a packed half-float load must not be described as fixing those separate binding errors.
 
 Mesh topology support does not implement vegetation culling compute, GPU-varying texture selection or permission to omit unsupported draws.
 
@@ -105,7 +149,7 @@ Important limits:
 - Added memory and floating-point operations may behave differently under faults or unusual floating-point trap settings. Normal-return preservation does not establish asynchronous exception/unwind equivalence.
 - Menus, pauses, transitions, physics, audio and cutscenes do not have comprehensive timing coverage.
 
-An earlier experiment with the same reviewed payload received strong positive qualitative gameplay feedback and movement closer to normal speed. There is no controlled, complete-game speed measurement, and the Lake Hylia water strobing remains.
+An earlier experiment with the same reviewed payload received strong positive qualitative gameplay feedback and movement closer to normal speed. There is no controlled, complete-game speed measurement, and the earlier Lake Hylia water-strobing report is not closed for Quality 03.
 
 The built-in **Adaptive Timing (Experimental)** Add-On is enabled by default. It is restricted to title ID 0400486024DEC000 and the Main module Build-ID E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348. It also checks the expected module layout, original hook operation, zero-filled code-cave region and metadata-backed padding before applying the timing change. A different title, build or layout skips it.
 

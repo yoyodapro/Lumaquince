@@ -1,60 +1,70 @@
-> **Publication note:** This record describes the qualified package before public publication. The earlier local-only destination statement below is superseded by the official public repository and release at https://github.com/yoyodapro/Lumaquince and https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1. The immutable complete ZIP retains its original prepublication record. Publication documentation changes do not rebuild its executables.
+<!--
+SPDX-FileCopyrightText: Lumaquince Contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
 
-# Lumaquince 0.1.0-preview.1 validation
+# Quality 03 validation
 
-This record covers the files in this release. Source review, compilation, synthetic tests and gameplay observations are separate results.
+The GitHub release is **`v0.1.0-preview.1-quality.3`**, titled **Lumaquince Quality 03 — Renderer and pipeline update**. The validated executables retain the internal version **`0.1.0-preview.1`**; they are not the original Preview 1 binaries. Identify this build by the Quality 03 release tag, compiled-source commit `bcbe1db80b66c33deb2fc9e96fffbd1a9229dd91` and executable checksums below. No executable was rebuilt just to change its displayed version.
 
-## Release identity
+The release archive is **`Lumaquince-quality-03-complete.zip`**, containing **`Lumaquince-quality-03/`**. Its `source/` directory preserves the exact compiled source. Updated documentation at the package root and in `windows/` is a release-record overlay; historical documentation inside `source/` remains part of the frozen compiler-source snapshot. A later public documentation commit does not change the binary identity.
 
-| Item | Result |
+## Exact build and isolated checks
+
+| Check | Result and scope |
 |---|---|
-| Project source | `e1e8299456cbccc35c88c9ddd9070e15fa81c7f0` â€” fresh local history under Lumaquince Contributors |
-| GUI SHA256 | `29c20f1002bae38a2581cc21779e41731db5a7162a2a1199561ace4730fad802` |
-| CLI SHA256 | `4571de7dd58a25a302a4074973622948649bb5aa1d8708f5dbd5198223c82f81` |
-| Build | Windows x86-64 Release, MSVC 19.51, link-time optimization |
-| GUI mode | Plain LTO; actual expanded link recipe, source inputs and PE imports verified, with no PGO runtime dependency |
-| Native tests | PASS — 841 total cases across the unfiltered main and updater suites (833 + 8); 17,140,991 assertions |
-| Focused timing tests | PASS — four cases and 117 assertions in an additional focused run |
-| Emitted SPIR-V validation | PASS — all 28 actual emitted modules validated offline |
-| Complete required checks | PASS — all 42 required checks |
-| File privacy review | Frozen source and all 15 release binary inputs independently reviewed; final archive review is recorded alongside the archive |
+| Windows x86-64 build | PASS — Release with link-time optimization; production NONE mode, no PGO performance claim |
+| Unfiltered native suites | PASS — **900 cases: 892 main + 8 updater** |
+| Required validation commands | PASS — **206**; this includes the suites, focused runs and shader validators, not 206 additional test suites |
+| Focused groups | PASS — **14 groups / 60 case executions**, repeated coverage reported separately from the 900 unique full-suite cases |
+| Actual emitted SPIR-V | PASS — **178 modules: 150 alignment + 6 matrix + 17 CAS + 5 mesh** |
+| New executable GUI startup and gameplay | **NOT RUN** |
+| New executable real GPU output, FPS and scene correctness | **NOT VALIDATED** |
+| Sustained 60 FPS, exact full-game simulation speed, multi-device compatibility | **NOT ESTABLISHED** |
 
-The full native suite ran through the same physical PC's isolated Windows Sandbox route, using the release's exact test binaries and thirteen pinned Microsoft runtime DLLs. No game, keys, firmware, save or personal profile was a test input. Host security policy was unchanged. Native success does not establish game behavior, normal simulation speed, complete Vulkan correctness or support on every PC.
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| `lumaquince.exe` | 60,953,088 | `d5bee379450344b61a951cef04e7748411a4cc6a81c1835034623a79e10b9811` |
+| `lumaquince-cli.exe` | 38,233,600 | `8187e62196837551ff8edac47d4a232b829c6dfd1e6b3f8bf0b0c09de0a435e6` |
+| `tests.exe` | 33,531,392 | `857d28bd859cebaa9c7a9724a97bcb911ac2230872e91e370da3abbb4862d6b5` |
+| `update_checker_tests.exe` | 7,266,816 | `98a81d4b71764d83cdb7002740473db8022a524639a519a84547b00ed5f1945d` |
 
-Host GUI startup, save transfer, new gameplay, image correctness and live GPU performance were not exercised for this rebuilt executable. The player retained control of an existing game session. Static PE/link inspection and native tests are not substitutes for those runtime checks.
+The completed validation record is dated 2026-11-06. Its full-suite assertion total is 17,338,931. Focused reruns and their assertions are separate from that full-suite result. The required-command inventory, execution order and exported-module inventory were checked against the exact test binaries and completed outputs; the 150 new alignment modules are included in the 178 total, not an additional set.
+
+The exact native test binaries ran in an isolated Windows Sandbox on the same physical test PC. No game, decryption keys, firmware, saves or personal profile were test inputs. Production NONE mode and existing validation guards were retained. Compilation, host fixtures and offline shader validators do not run the game renderer or demonstrate correct GPU data, images or performance.
+
+Coverage includes production-path uniform ownership and mixed bindings; mapped and staged host-read synchronization; shader register pressure and storage alignment; query publication; pipeline ownership, exceptions, multiple waiters, destruction and bounded reload reuse; worker cancellation; and the existing GPU split lifetime checks. These are bounded fixtures, not exhaustive scheduling or device coverage.
 
 ## Gameplay evidence and remaining issues
 
-An earlier private experiment using the same 176-byte timing payload received strong positive user feedback, including movement closer to normal speed. The new built-in integration is guarded and tested separately. That observation is qualitative feedback about the earlier executable; it is not a controlled benchmark or a complete-game acceptance test of this rebuilt executable.
+The latest accepted Quality 02 predecessor received qualitative feedback that the sky beams were gone and materials looked normal. That observation belongs to the earlier executable built from source `a52eada6b0a7e02b162db5bd0467e8afd1e0e927` and does not qualify the new Quality 03 build. Other reported issues are unresolved or unverified on this candidate, not assertions that each symptom is still visible after those earlier improvements.
 
-Lake Hylia water strobing remains unresolved. Invalid GPU-dependent texture bindings and incomplete lighting/color correctness remain open. The timing option has shared-state, smoothing, low-throughput, transition, audio, physics and exception/unwind limitations. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and [DIFFERENCES.md](DIFFERENCES.md).
+The previously accepted development gameplay session and positive movement feedback are evidence for an earlier executable. The same reviewed timing payload remains, but **Quality 03 GUI startup, gameplay, image correctness and live FPS were not exercised**. Earlier observations do not qualify these new renderer and pipeline changes.
 
-The editable `windows/nx2_switches.txt` matches the tested profile: split mode 2, fence batching enabled, native draw flush budget 4096 and encountered-cache preload-all enabled. These are file overrides; the C++ bounded preload and native draw-budget defaults are unchanged. Preload-all can increase startup time and memory use and cannot prepare unseen shaders. No game-derived cache is supplied.
+Historical observations around 45 FPS in a static view and 49–60 in changing views were made under differing scene/cache conditions. No matched speedup, sustained 60 FPS result, exact whole-game simulation-speed result or broad hardware compatibility is established.
+
+Excessive glare, glowing/stretched triangles, black materials, invalid texture bindings and Lake Hylia water strobing remain checks for a real gameplay session. Shader-time GPU-dependent texture selection, general aliases, lossless query accumulation and quality-preserving large-ASTC residency remain unfinished. Timing retains its shared-state, smoothing, low-throughput, transitions, audio, physics and exceptional-return limits. See [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
+The editable `windows/nx2_switches.txt` retains split mode 2, fence batching, draw-flush budget 4096 and encountered-cache preload-all. These are file overrides; the C++ bounded-preload and draw-budget defaults remain unchanged. Preload-all may increase startup work and memory use. No game-derived cache is supplied.
 
 ## Source and dependencies
 
-The `source` directory contains the matching modified project source and build scripts. `SOURCE-AND-BINARY-IDENTITY.json` identifies the compiled tree; the packaged `VALIDATION.md` copies are release records added after compilation, not compiler inputs. Git history and local repository configuration are excluded from the archive.
+The complete package's `source/` preserves the compiled project tree and build scripts at the commit stated above. Updated release documents are supplied separately at the package root and in `windows/`. Public repository documentation can be newer than the compiled source; a documentation commit does not rebuild the executables. `SOURCE-AND-BINARY-IDENTITY.json` and the package source inventory identify that separation. Git history and local repository configuration are excluded from the application archive.
 
-The separately inventoried `dependency-sources` directory contains recovered source, applicable patches, recipes and notices for the selected dependencies, including Qt, FFmpeg and its AV1 dependency, OpenSSL, SDL, Sirit and the selected CPM components. Use its current provenance manifest, source allowlist and public report; do not treat upstream CI workflow files as local setup instructions.
+The separately inventoried `dependency-sources/` materials contain recovered source, applicable patches, producer/reconstruction recipes and notices. Consult the accompanying provenance report for the selected versions and their relationship to the prebuilt libraries. Do not substitute a similarly named source-cache alternative or treat historical producer CI as local setup instructions.
 
-Qt module source identities and cached SDK SBOM checksums were reconciled. QtCharts retains its GPL terms. OpenSSL's artifact label and actual development-library version are distinguished. Sirit's BSD source headers and differing root license files are all preserved. No blanket single-license assertion is made for third-party components.
+Third-party components retain their own terms and attribution. QtCharts retains its GPL terms; OpenSSL artifact labels and development-library versions must be distinguished; Sirit's source headers and root license files remain preserved. No blanket single-license or completed legal-compliance claim is made.
 
-A clearly labeled, untested FFmpeg/dav1d reconstruction recipe is included with recovered source pins, observed options and guarded object-archive merging. The original producer invocation and byte-identical output remain unproved. Do not present the reconstruction as an executed dependency rebuild.
+Independent bit-for-bit rebuilds of every prebuilt static dependency have not been performed. The labeled FFmpeg/dav1d reconstruction recipe is untested; the original invocation and byte-identical output remain unproved. Supplied generated timezone data is separate from console firmware; the converter tag does not establish the original IANA input, and byte-identical conversion remains unproved. A fully offline dependency build is not claimed.
 
-The exact public generated timezone data used by this build is supplied separately from console firmware. Its recorded converter tag does not prove the original IANA input. A candidate IANA source is included, and byte-identical conversion was not established. Independent bit-for-bit rebuilds of all prebuilt static dependencies were not performed. A completely offline dependency build is not claimed; the inherited CI-package helper may still fetch checksums.
+## Distribution review
 
-Microsoft runtime libraries were copied unchanged from official installed redistributable directories, with valid Microsoft signatures and recorded hashes. Their applicable notices and SDK license accompany the application. Optional NVIDIA runtime DLLs are absent. System libraries and build tools retain their own licensing.
+Use the release's `SHA256SUMS.txt`, source/binary identity and accompanying package-review records for the final archive size, hashes, inventory and privacy-review result. Earlier Preview 1 package file counts and scanner classifications are not reused as proof for this archive.
 
-## Privacy scope
-
-The release was assembled from explicit source, executable, runtime and dependency-source inventories. Personal profiles, accounts, saves, game files, decryption keys, firmware, shader caches, logs, dumps, screenshots, private build receipts, PDBs, object files and personal Git history were excluded. Normal source code and public cryptographic test fixtures supplied by dependencies are distinct from personal or console decryption keys.
-
-All 5,051 frozen project-source pins and the 15 release binary hashes were independently reconciled. The two owned executable CodeView references contain PDB basenames. Twelve scanner findings in the GUI were matched to six exact boundaries in a public Qt geographic timezone table, with duplicate UTF-16 interpretations; the entire canonical table matches the supplied Qt source and static library. This is an exact provenance classification, not a general exemption for an identifier. Public vendor signatures and build metadata are preserved in unchanged Microsoft DLLs. Public Gradle build-tool JARs and upstream compression test fixtures remain identified source materials, not personal compiler output. See the accompanying package review and checksum file for final archive readback.
-
-Public upstream author names, copyright notices and licenses were retained. Known-identifier and path scans cannot prove anonymity against every encoding, arbitrary personal identifier or external publication trail. Publishing through a personal account can identify the publisher independently of the archive contents.
+The distribution policy excludes games, keys, firmware, personal accounts/profiles, saves, controller mappings, game-derived caches, logs, dumps, screenshots, private build receipts, PDBs, object files and personal Git history. Public upstream author names, copyright notices, public dependency test fixtures and applicable license notices are retained. Hashes prove observed byte identity, not gameplay compatibility or freedom from malware; bounded privacy scans do not prove anonymity against every encoding or identifier.
 
 ## Rebuilding
 
-Use `source/tools/windows/build-lumaquince.ps1` with explicit source-adjacent build, dependency and tools directories. See the source README and dependency recipes for versions and input selection. `-ConfigureOnly` performs configuration; `-SkipTests` performs compilation without qualifying the result. Do not reuse the native test result here for a changed executable or dependency set.
+Use [BUILD-RECIPE.md](BUILD-RECIPE.md) with the exact packaged source and selected dependency materials. `-ConfigureOnly` performs configuration; `-SkipTests` compiles without qualifying the build. A changed source tree, executable, toolchain or dependency selection requires its own validation and distribution review.
 
-No online repository, release endpoint or update service is represented as this fork's official destination. This package is a local experimental preview.
+Official release: [v0.1.0-preview.1-quality.3](https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1-quality.3). Automatic update checking, web service and Discord presence remain disabled in the build configuration.

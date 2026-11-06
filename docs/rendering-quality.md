@@ -2,9 +2,9 @@
 
 # Rendering quality work
 
-This describes unreleased source changes. The published Preview 1 package is separate; its
-validation records apply to that exact package. Source review and synthetic tests do not prove
-correct GPU output, normal game speed or whole-game compatibility.
+This describes the Quality 03 source at `bcbe1db80b66c33deb2fc9e96fffbd1a9229dd91`, including the unpublished Quality 02 renderer work. The release tag is `v0.1.0-preview.1-quality.3`; the binary's internal version remains `0.1.0-preview.1`. The earlier public Preview 1 package is separate.
+
+Quality 03 passed its Release/LTO build, 900 full-suite native cases, 206 required commands and validation of 178 actual emitted SPIR-V modules. Gameplay and real GPU/FPS validation are pending. Source review and synthetic tests do not prove correct GPU output, normal game speed or whole-game compatibility.
 
 The development goal is consistent resource ownership, ordering and state throughout the
 renderer. Reported glare, stretched triangles and black materials remain gameplay checks for
@@ -12,6 +12,9 @@ each candidate rather than assumed consequences of a passing test suite.
 
 | Shared system | Development change | Practical boundary |
 | --- | --- | --- |
+| Uniform ownership | Prepare GPU-owned uniforms before graphics/compute descriptor binding; preserve newer CPU bytes and clean-bank fast paths. | Mixed direct/staged banks require ordering; a fixture pass does not prove game output. |
+| Translation caches | Distinguish device-memory manager lifetimes when reusing block-read translations. | A reused manager address cannot safely serve as the sole cache identity. |
+| LOP3 operand handling | Include constant/uniform forms in register-pressure shadow handling, adapted from Lichii PR 241 at `d25d06b588fee6fed11a16617090d707987c4756`. | Existing SHF support and aligned reservations remain. |
 | Resource reads | Reconcile GPU-produced texture handles, sampler/image descriptors and storage pointers before CPU decoding. Preserve newer CPU bytes and complete readback before binding descriptors. | Clean resources avoid submission/readback. This does not implement all shader-varying texture selection. |
 | Feedback | Evaluate overlap using the current draw's sampled views, even when descriptor-table addresses are unchanged. | Existing depth-write/barrier throttling remains. General aliasing coverage is still incomplete. |
 | Input assembly | Use the same effective topology and restart rules for pipeline creation and dynamic state; track stage changes even with unchanged guest topology. | Task/mesh slots do not imply tessellation. This does not prove that a topology warning caused a reported visual defect. |
@@ -33,7 +36,7 @@ upstream commit `0f0720d07ddeeb52b0f59826b2e79b6b03302ab3`, with additional loca
 and waiting paths corrected during review. Original project copyright and license notices are
 preserved.
 
-The next development candidate selectively adapts [Lichii PR 295](https://github.com/zortos293/Lichii/pull/295)
+Quality 03 selectively adapts [Lichii PR 295](https://github.com/zortos293/Lichii/pull/295)
 (`18cfe8556341a0b969a7ae28b71fb541632a90ca`) for storage alignment and GPU ordering,
 [PR 290](https://github.com/zortos293/Lichii/pull/290)
 (`c9bdbaa38ee522e3124ae05eb56c74be15cf780a`) for cancelled-worker wakeups,
@@ -45,6 +48,8 @@ a merge of the upstream branch. Existing descriptor coherence, feedback, tessell
 query lifetime and warm-residency fixes remain in place. Vulkan/driver cache versions remain
 57/52; preload policy, two-session history, two-minute save cadence, timing controls and
 diagnostic defaults are unchanged. See [pipeline ownership and prebuild limits](nx2/async-native-pipelines.md).
+
+The latest accepted Quality 02 predecessor received qualitative feedback that the sky beams were gone and materials looked normal. That observation belongs to the earlier executable built from source `a52eada6b0a7e02b162db5bd0467e8afd1e0e927` and does not qualify the new Quality 03 build. Other reported issues are unresolved or unverified on this candidate, not assertions that each symptom is still visible after those earlier improvements.
 
 ## Remaining work
 

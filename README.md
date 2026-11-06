@@ -17,13 +17,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 A focused Windows emulator fork, a complete setup guide, and a preview with its evidence in the open.</p>
 
 <p align="center">
-  <a href="https://github.com/yoyodapro/Lumaquince/releases/download/v0.1.0-preview.1/Lumaquince-0.1.0-preview.1-complete.zip"><strong>Download for Windows x64</strong></a>
-  · <a href="https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1">Release notes &amp; checksums</a>
+  <a href="https://github.com/yoyodapro/Lumaquince/releases/download/v0.1.0-preview.1-quality.3/Lumaquince-quality-03-complete.zip"><strong>Download for Windows x64</strong></a>
+  · <a href="https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1-quality.3">Release notes &amp; checksums</a>
   · <a href="#quick-start">Quick start</a>
   · <a href="KNOWN_ISSUES.md">Known issues</a>
 </p>
 
-**0.1.0-preview.1 · Experimental · Windows x86-64**
+**Quality 03 · Experimental · Windows x86-64**
+
+GitHub release **`v0.1.0-preview.1-quality.3`**. The validated binary retains internal version **`0.1.0-preview.1`**; use the release tag, source commit and hashes below to distinguish it from the original Preview 1 build.
 
 Lumaquince is an independent, open-source fork of [Lichii](https://github.com/zortos293/Lichii), building on Eglantine, Eden, yuzu and Sudachi. This preview brings together a guarded Ocarina of Time timing option, focused shader and Vulkan fixes, cache and memory work, and a documented gameplay profile. It is intended for people who want a clear starting point for **OOT Remake on PC** and enough detail to understand what they are running.
 
@@ -33,19 +35,31 @@ Our recommendation reflects that focus and the documented development experience
 
 ## Download
 
-Get **[Lumaquince-0.1.0-preview.1-complete.zip](https://github.com/yoyodapro/Lumaquince/releases/download/v0.1.0-preview.1/Lumaquince-0.1.0-preview.1-complete.zip)** from the [preview release](https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1).
+Get **[Lumaquince-quality-03-complete.zip](https://github.com/yoyodapro/Lumaquince/releases/download/v0.1.0-preview.1-quality.3/Lumaquince-quality-03-complete.zip)** from the [preview release](https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1-quality.3).
 
-The complete package includes the Windows application and runtime libraries, matching modified project source and build scripts, recovered dependency-source materials and applicable notices, a build recipe, and release validation records. The package is **315,888,571 bytes**.
+The complete package includes the Windows application and runtime libraries, matching modified project source and build scripts, recovered dependency-source materials and applicable notices, a build recipe, and release validation records. Consult the release's **SHA256SUMS.txt** and package-review records for the final archive size and checksum.
 
 **No game, console decryption keys, console firmware, saves, personal profile, controller configuration or game-derived shader cache is included.** Supply your own lawfully obtained game and system files. This project does not provide download links for them.
 
 Use the named complete ZIP for the application. GitHub's automatically generated “Source code” archives do not include the Windows application or the separately inventoried dependency-source bundle.
 
+## What changed in Quality 03?
+
+This update includes **all unpublished Quality 02 and Quality 03 work** since the public Preview 1 release:
+
+- GPU-owned uniform/resource reads complete before descriptor binding, with exact ownership spans and preservation of newer CPU data. Device-memory translation caches distinguish owner lifetimes.
+- Dynamic topology, restart and mesh/tessellation transitions stay consistent; feedback checks use current sampled views. Read-only storage pools can cover larger mapped tables within actual device limits.
+- Query reports retain their real GPU-fence lifetime. Storage vector accesses use alignment-safe lowering; compute, indirect, graphics and mapped-host reads gain the required publication ordering.
+- Constant/uniform LOP3 operand handling is corrected. Warm pipelines are retained within driver-budget/count safeguards; native graphics emission owns its work and compatible cached prebuilds have bounded inputs and reload lifetimes.
+- Cancelled-worker completion uses the waiting-thread mutex protocol. New fixtures cover these ownership, cancellation, alignment and pipeline boundaries.
+
+The result is **900 passing native test cases and 178 validated emitted SPIR-V modules**. New gameplay and FPS remain unvalidated. Timing controls and diagnostic defaults are unchanged. Read the [full release notes](RELEASE_NOTES.md) for details and upstream credit.
+
 ## Quick start
 
 1. **Extract the complete ZIP into a new folder.** Keep the entire extracted package and the DLLs beside the application. Do not run the executable from inside the ZIP or copy only the EXE.
 2. **Back up your own existing saves and settings.** Keep the backup separate from the new application folder before testing an experimental build.
-3. **Open `Lumaquince-0.1.0-preview.1/windows/lumaquince.exe`.** The command-line frontend is `windows/lumaquince-cli.exe`.
+3. **Open `Lumaquince-quality-03/windows/lumaquince.exe`.** The command-line frontend is `windows/lumaquince-cli.exe`.
 4. **Supply your own system files.** Use the application's **Install Decryption Keys** and **Install Firmware** menu actions with your own lawfully obtained files. Do not reuse someone else's profile to obtain these files or settings.
 5. **Add your own game.** Use **Add New Game Directory** in the game list or **File → Load File**. Use the matching game/update build for the timing option described below; another build is not automatically compatible.
 6. **Configure your controller.** Open **Emulation → Configure → Controls**, select your input device, map the controls, and save the configuration. No personal controller mapping is shipped.
@@ -63,7 +77,7 @@ The release contains no automated save transfer and no supplied save. A copied p
 
 | Focus | What the preview brings together | What the evidence supports |
 |---|---|---|
-| Game feel | Built-in **Adaptive Timing (Experimental)** for one exact supported OOT build, using the reviewed 176-byte timing payload. | Earlier private gameplay with the same payload received very positive feedback and movement closer to normal speed. That is qualitative predecessor feedback, not a benchmark of this rebuilt GUI. |
+| Game feel | Built-in **Adaptive Timing (Experimental)** for one exact supported OOT build, using the reviewed 176-byte timing payload. | Earlier development gameplay with the same payload received very positive feedback and movement closer to normal speed. That is qualitative predecessor feedback, not a benchmark of this rebuilt GUI. |
 | Shader correctness | CAS retry fixes, packed/shared-memory fixes, high-register operand handling and depth-comparison image typing, plus retained task/mesh work. | Targeted source fixes and offline emitted-module validation. GPU-dependent texture binding and complete lighting remain open. |
 | Vulkan behavior | Narrow fixes for query ordering, copy/upload barriers, surface creation, dynamic vertex stride and ASTC linear/sRGB views. | A bounded predecessor replay stopped reproducing six earlier error classes. This is not a clean-Vulkan or all-scene result for the new executable. |
 | Memory and host work | Buffer ownership/retirement, bounded readbacks, physical-remap notifications, selected command-state reuse and bounded worker lifetimes. | Specific implementation and test coverage; no measured whole-game FPS or memory percentage is claimed. |
@@ -74,9 +88,9 @@ Read **[DIFFERENCES.md](DIFFERENCES.md)** for the complete technical account, in
 
 ## OOT gameplay settings
 
-These are the recorded graphics/core choices from the successful development profile. **Apply them manually**; they are not all clean-install defaults or a universal performance preset. In particular, the clean C++ GPU-accuracy default remains **High**. Selecting **Low** is your performance/accuracy tradeoff.
+These are historical graphics/core choices from an earlier development profile, not newly measured Quality 03 settings. **Apply them manually**; they are not all clean-install defaults or a universal performance preset. In particular, the clean C++ GPU-accuracy default remains **High**. Selecting **Low** is your performance/accuracy tradeoff.
 
-| Setting | OOT development profile |
+| Setting | Historical OOT development profile |
 |---|---|
 | Graphics backend | Vulkan |
 | Resolution scale | 0.75x / three quarters |
@@ -95,7 +109,7 @@ These are the recorded graphics/core choices from the successful development pro
 | NVIDIA replacement DLSS / translated game DLSS network | Disabled |
 | Adaptive Timing (Experimental) | Enabled, exact supported build only |
 
-Lower resolution trades detail for GPU cost. Low GPU accuracy may affect rendering; try **High** when investigating an image problem and compare the same scene after shader activity settles. These settings do not fix the unresolved water strobing. See [GAMEPLAY-PROFILE.md](GAMEPLAY-PROFILE.md) for the full guide.
+Lower resolution trades detail for GPU cost. Low GPU accuracy may affect rendering; try **High** when investigating an image problem and compare the same scene after shader activity settles. These settings are not a demonstrated fix for the earlier water-strobing report. See [GAMEPLAY-PROFILE.md](GAMEPLAY-PROFILE.md) for the full guide.
 
 ### The performance file already shipped
 
@@ -133,33 +147,35 @@ The algorithm uses a roughly 3% deadband, one-eighth smoothing and a 50 ms elaps
 
 The following results apply to the **exact release inputs recorded in [VALIDATION.md](VALIDATION.md)**. They are not a gameplay benchmark.
 
-| Check | Result |
+| Check | Result and scope |
 |---|---|
-| Windows build | x86-64 Release, MSVC 19.51, plain link-time optimization; no PGO performance claim |
-| Unfiltered native suites | **PASS: 841 aggregate cases** = 833 main + 8 updater; **17,140,991 assertions** |
-| Additional focused timing run | **PASS: 4 cases / 117 assertions**; reported separately, not added to the 841 aggregate |
-| Actual emitted SPIR-V modules | **PASS: 28 modules** validated offline |
-| Required release checks | **PASS: 42 checks** |
-| Final package inventory review | 6,447 files reconciled; 5,051 frozen source pins, 742 dependency-material pins and 15 binary hashes; zero unclassified scanner findings in the configured review |
-| New executable GUI startup | **NOT RUN** |
-| New executable gameplay, live GPU performance and image correctness | **NOT RUN** |
-| Controlled whole-game timing, sustained 60 FPS and multi-device compatibility | **NOT ESTABLISHED** |
+| Windows x86-64 build | PASS — Release with link-time optimization; production NONE mode, no PGO performance claim |
+| Unfiltered native suites | PASS — **900 cases: 892 main + 8 updater** |
+| Required validation commands | PASS — **206**; this includes the suites, focused runs and shader validators, not 206 additional test suites |
+| Focused groups | PASS — **14 groups / 60 case executions**, repeated coverage reported separately from the 900 unique full-suite cases |
+| Actual emitted SPIR-V | PASS — **178 modules: 150 alignment + 6 matrix + 17 CAS + 5 mesh** |
+| New executable GUI startup and gameplay | **NOT RUN** |
+| New executable real GPU output, FPS and scene correctness | **NOT VALIDATED** |
+| Sustained 60 FPS, exact full-game simulation speed, multi-device compatibility | **NOT ESTABLISHED** |
 
 The release's exact native test binaries ran in an isolated Windows Sandbox on the same physical test PC. No game, keys, firmware, save or personal profile was a test input. Passing those tests does not establish GUI/GPU behavior.
 
-Earlier private gameplay using the same reviewed timing payload received strong positive feedback, including movement closer to normal speed. Earlier predecessor observations around 45 FPS in one static view and 49–60 in changing views came from differing scene/cache conditions. They are not matched before/after benchmarks, a percentage improvement, or sustained 60 FPS evidence for this release. Rendered FPS, presentation intervals, scanout and guest simulation speed are distinct measurements.
+Earlier development gameplay using the same reviewed timing payload received strong positive feedback, including movement closer to normal speed. Earlier predecessor observations around 45 FPS in one static view and 49–60 in changing views came from differing scene/cache conditions. They are not matched before/after benchmarks, a percentage improvement, or sustained 60 FPS evidence for this release. Rendered FPS, presentation intervals, scanout and guest simulation speed are distinct measurements.
 
 ### Exact release identity
 
 | Item | Identity |
 |---|---|
-| Release | [`v0.1.0-preview.1`](https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1) |
-| Compiled project-source identity recorded in the package | [`e1e8299456cbccc35c88c9ddd9070e15fa81c7f0`](https://github.com/yoyodapro/Lumaquince/tree/source-v0.1.0-preview.1) |
-| Complete ZIP SHA-256 | `94adfdbe2ffe133f19806c98af9dddc1910a78f3ae033c753725e93a93f2b7be` |
-| `windows/lumaquince.exe` SHA-256 | `29c20f1002bae38a2581cc21779e41731db5a7162a2a1199561ace4730fad802` |
-| `windows/lumaquince-cli.exe` SHA-256 | `4571de7dd58a25a302a4074973622948649bb5aa1d8708f5dbd5198223c82f81` |
+| GitHub release | [`v0.1.0-preview.1-quality.3`](https://github.com/yoyodapro/Lumaquince/releases/tag/v0.1.0-preview.1-quality.3) |
+| Internal application version | `0.1.0-preview.1` (retained in the exact validated binaries) |
+| Compiled source | [`bcbe1db80b66c33deb2fc9e96fffbd1a9229dd91`](https://github.com/yoyodapro/Lumaquince/tree/bcbe1db80b66c33deb2fc9e96fffbd1a9229dd91) |
+| Complete ZIP identity | See the release's `SHA256SUMS.txt` and package-review records |
+| `windows/lumaquince.exe` SHA-256 | `d5bee379450344b61a951cef04e7748411a4cc6a81c1835034623a79e10b9811` |
+| `windows/lumaquince-cli.exe` SHA-256 | `8187e62196837551ff8edac47d4a232b829c6dfd1e6b3f8bf0b0c09de0a435e6` |
 
-The compiled source identity above records the source used for these binaries; later public documentation or repository-history changes do not rebuild them. The packaged validation record was written before publication; its local-only destination statement is superseded by this public repository and release. Consult the release's **SHA256SUMS.txt**, **PACKAGE-REVIEW** and packaged **SOURCE-AND-BINARY-IDENTITY.json** for the exact records. A checksum establishes byte identity, not game compatibility or malware freedom.
+The matching compiled tree is preserved in the package's `source/`. Updated public documentation is a separate release-record overlay at the package root and in `windows/`; documentation within `source/` remains frozen. A later public documentation commit does not rebuild these executables. See `SOURCE-AND-BINARY-IDENTITY.json` and [VALIDATION.md](VALIDATION.md). A checksum establishes byte identity, not game compatibility or malware freedom.
+
+The latest accepted Quality 02 predecessor received qualitative feedback that the sky beams were gone and materials looked normal. That observation belongs to the earlier executable built from source `a52eada6b0a7e02b162db5bd0467e8afd1e0e927` and does not qualify the new Quality 03 build. Other reported issues are unresolved or unverified on this candidate, not assertions that each symptom is still visible after those earlier improvements.
 
 ## Known issues to understand first
 
