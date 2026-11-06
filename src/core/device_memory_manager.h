@@ -150,18 +150,19 @@ private:
     /// cleared by Map on a service thread between the GPU thread's null check of an entry and
     /// its use, and the GPU thread copied from address 0 (title 1 crashed every few minutes).
     struct TranslationCache {
-        const void* owner{};
+        u64 owner_id{};
         u64 generation{};
         std::array<TranslationEntry, 4> slots{};
         u32 cursor{};
     };
     static inline thread_local TranslationCache t_cache{};
+    static inline std::atomic<u64> next_translation_owner_id{1};
 
-    /// This thread's translations, emptied when Map or Unmap ran since they were made.
+    /// This thread's translations, emptied on a new manager lifetime or mapping generation.
     TranslationCache& Translations() {
         const u64 current = translation_generation.load(std::memory_order_acquire);
-        if (t_cache.owner != this || t_cache.generation != current) {
-            t_cache = TranslationCache{.owner = this, .generation = current};
+        if (t_cache.owner_id != translation_owner_id || t_cache.generation != current) {
+            t_cache = TranslationCache{.owner_id = translation_owner_id, .generation = current};
         }
         return t_cache;
     }
@@ -242,6 +243,8 @@ private:
         tracked_entries.GetUnchecked(page_index).cpu_backing_address = address | (asid.id << asid_start_bit);
     }
 
+    // An address can be reused while another thread still holds the old manager's translations.
+    const u64 translation_owner_id = next_translation_owner_id.fetch_add(1, std::memory_order_relaxed);
     std::atomic<u64> translation_generation{1}; ///< Bumped by Map and Unmap
     using CounterType = u8;
     using CounterAtomicType = std::atomic_uint8_t;
