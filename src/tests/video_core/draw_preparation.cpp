@@ -292,6 +292,13 @@ struct BufferCacheTestAccess {
         cache.UpdateComputeUniformBuffers();
         cache.BindHostComputeUniformBuffers();
     }
+    static void GraphicsUniforms(Cache& cache, BufferCacheChannelInfo& channel) {
+        cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.gpu_memory = &channel.gpu_memory;
+        cache.UpdateUniformBuffers(0);
+        cache.BindHostGraphicsUniformBuffers(0);
+    }
     static void CpuDirty(Cache& cache, DAddr address, u64 size) {
         cache.memory_tracker.MarkRegionAsCpuModified(address, size);
     }
@@ -800,6 +807,46 @@ TEST_CASE("Compute uniforms append mixed streamed and cached bindings in enabled
     CHECK(f.runtime.uploads == 0);
     CHECK(f.runtime.downloads == 0);
     CHECK(f.runtime.finishes == 0);
+}
+
+TEST_CASE("Uniform readback completes before the first descriptor of a draw or dispatch",
+          "[video_core][draw_preparation][uniform_coherency]") {
+    for (const bool compute : {false, true}) {
+        CAPTURE(compute);
+        UniformFixture f;
+        f.runtime.uniform_alignment = 256;
+        const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+        std::memset(f.bytes + 0x10000, 0x31, 256);
+        std::fill_n(Access::Get(*f.cache, id).bytes.begin() + 0x1010, 256, 0x73);
+        Access::Dirty(*f.cache, 0x21010, 256);
+        const VideoCommon::Binding clean{
+            .device_addr = 0x20000, .size = 256, .buffer_id = id};
+        const VideoCommon::Binding gpu_written{
+            .device_addr = 0x21010, .size = 256, .buffer_id = id};
+        f.runtime.before_completion = [&] {
+            // A submission here must not retire an earlier descriptor's stream allocation.
+            CHECK(f.runtime.uniform_bindings.empty());
+        };
+        if (compute) {
+            f.compute_sizes[0] = f.compute_sizes[2] = 256;
+            f.channel->enabled_compute_uniform_buffer_mask = (1U << 0) | (1U << 2);
+            f.channel->compute_uniform_buffers[0] = clean;
+            f.channel->compute_uniform_buffers[2] = gpu_written;
+            Access::ComputeUniforms(*f.cache, *f.channel);
+        } else {
+            f.graphics_sizes[0][0] = f.graphics_sizes[0][2] = 256;
+            f.channel->enabled_uniform_buffer_masks[0] = (1U << 0) | (1U << 2);
+            f.channel->uniform_buffers[0][0] = clean;
+            f.channel->uniform_buffers[0][2] = gpu_written;
+            Access::GraphicsUniforms(*f.cache, *f.channel);
+        }
+        REQUIRE(f.runtime.uniform_bindings.size() == 2);
+        CHECK(f.runtime.finishes == 1);
+        CHECK(std::ranges::all_of(f.runtime.uniform_bindings[0].bytes,
+                                  [](u8 value) { return value == 0x31; }));
+        CHECK(std::ranges::all_of(f.runtime.uniform_bindings[1].bytes,
+                                  [](u8 value) { return value == 0x73; }));
+    }
 }
 
 TEST_CASE("Buffer downloads clip cross-buffer requests before clearing dirty pages",
