@@ -22,7 +22,14 @@
 
 namespace Common {
 
-template <class StateType = void>
+// Defaults keep the normal pool's synchronization unchanged. Tests can substitute forwarding
+// primitives to observe the predicate-to-wait transition without platform CV interposition.
+struct ThreadWorkerSynchronization {
+    using Mutex = std::mutex;
+    using WaitCondition = std::condition_variable;
+};
+
+template <class StateType = void, class Synchronization = ThreadWorkerSynchronization>
 class StatefulThreadWorker {
     static constexpr bool with_state = !std::is_same_v<StateType, void>;
 
@@ -85,7 +92,10 @@ public:
                     ++work_done;
                 }
             }
-            ++workers_stopped;
+            {
+                std::unique_lock lock{queue_mutex};
+                ++workers_stopped;
+            }
             wait_condition.notify_all();
         };
         threads.reserve(num_workers);
@@ -145,9 +155,9 @@ private:
     std::queue<Task> requests;
     std::queue<Task> accepted_requests;
     bool stopping{};
-    std::mutex queue_mutex;
+    typename Synchronization::Mutex queue_mutex;
     std::condition_variable_any condition;
-    std::condition_variable wait_condition;
+    typename Synchronization::WaitCondition wait_condition;
     std::atomic<size_t> work_scheduled{};
     std::atomic<size_t> work_done{};
     std::atomic<size_t> workers_stopped{};

@@ -116,6 +116,7 @@ add_executable(tests
     common/slot_vector.cpp
     common/undefined_fix.cpp
     common/unique_function.cpp
+    common/thread_worker.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
     core/thread_startup_policy.cpp
