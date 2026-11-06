@@ -125,9 +125,11 @@ The editable shipped dist/nx2_switches.txt profile selects split mode 2, fence b
 | EDEN_NX2_PRELOAD_ALL_PIPELINES | 1 |
 | EDEN_DKB_FRAME_TRACE | 0 |
 
-In particular, the C++ preload-all default remains false and the native preload budget remains 128. The shipped EDEN_NX2_PRELOAD_ALL_PIPELINES setting can increase startup compilation and memory use by considering all encountered compatible pipeline records. Remove that line to restore the bounded used-list policy. Neither policy discovers unseen shaders or guarantees a stutter-free game. Spin budgets remain at their inherited defaults.
+In particular, the C++ preload-all default remains false and the native draw-submission budget remains 128. The shipped EDEN_NX2_PRELOAD_ALL_PIPELINES setting can increase startup compilation and memory use by considering all encountered compatible pipeline records. Remove that line to restore the bounded used-list policy. Neither policy discovers unseen shaders or guarantees a stutter-free game. Spin budgets remain at their inherited defaults.
 
 Lumaquince uses its own application-data directory. Update checking, web service and Discord presence are disabled in the release configuration. See [VALIDATION.md](VALIDATION.md) for the actual packaged profile and build-option checks.
+
+The inherited release parser and asset selector now use the repository and tag passed to each release record, rather than optional application-wide update metadata. The HTML fallback maps only the exact GitHub API origin to its website origin; an explicitly supplied Forgejo origin is retained. Empty caller parameters and inconsistent cached tags are rejected, while exact download-origin, repository, filename and platform matching remain. This fixes offline updater utility tests without configuring an update endpoint or enabling update checks.
 
 Debug/TAS capture profiles, global clock changes, shader rejection, fog/shadow removal, forced texture handles, disabled comparison sampling and deletion of required waits are not credited as fixes in this preview. Diagnostics inherited from upstream remain opt-in facilities, not an automatically enabled gameplay configuration.
 
