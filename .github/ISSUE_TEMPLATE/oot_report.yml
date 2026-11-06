@@ -1,0 +1,44 @@
+name: OOT Remake gameplay or application problem
+description: Report a reproducible Lumaquince preview issue.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the known issues and privacy guide first. Lake Hylia water strobing remains open. Remove personal paths, names, account details and private URLs from excerpts. Do not attach game/system files, saves, caches, dumps or raw GPU captures.
+  - type: input
+    id: version
+    attributes:
+      label: Lumaquince version and EXE checksum
+      placeholder: 0.1.0-preview.1; SHA-256 from the release
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS, CPU, GPU and graphics-driver version
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game and update version or Build-ID
+      description: Identify the version without sharing game files.
+  - type: textarea
+    id: settings
+    attributes:
+      label: Relevant graphics/core settings and Adaptive Timing state
+      description: Mention resolution, GPU accuracy, shader settings and enabled mods.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps, expected behavior and observed behavior
+      description: Include the area and whether this began in this version. Note comparisons with High GPU accuracy or timing disabled only if you tested them.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Optional minimal sanitized diagnostic excerpt
+      description: Review and remove personal information before posting.
