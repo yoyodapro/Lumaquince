@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>lumaquince</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Lumaquince</name>
+  <summary>Experimental Nintendo Switch and Switch 2 emulator</summary>
+  <description>
+    <p>Lumaquince is an experimental open-source emulator fork derived from Lichii, Eglantine and Eden, with work inherited from yuzu and Sudachi. Compatibility and performance vary by game and hardware.</p>
+  </description>
+  <launchable type="desktop-id">lumaquince.desktop</launchable>
+  <provides><binary>lumaquince</binary></provides>
+  <categories><category>Game</category><category>Emulator</category></categories>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer_name>Lumaquince contributors</developer_name>
+  <content_rating type="oars-1.0"/>
+</component>

@@ -1,0 +1,23 @@
+# Lumaquince 0.1.0 Preview 1 - editable GUI launch profile.
+# One NAME=VALUE per line; lines starting with # are ignored.
+# An existing environment variable wins over this file. The later user copy at
+# %APPDATA%\Lumaquince\nx2_switches.txt (Windows) or
+# $XDG_CONFIG_HOME/Lumaquince/nx2_switches.txt (Unix) wins over this package copy.
+# Restart the emulator after editing. These are existing compatibility variable names.
+#
+# This profile reproduces the reviewed Ocarina of Time preview setup. Compatibility
+# and performance in other titles are not guaranteed. No profiling or capture is enabled.
+
+# Existing GPU thread split and fence batching defaults.
+EDEN_NX2_SPLIT=2
+EDEN_NX2_FENCE_BATCH=1
+
+# Explicit preview profile overrides; the underlying C++ defaults are unchanged.
+# Native Vulkan draw submission budget. Remove this line to use the default of 128.
+EDEN_NX2_FLUSH_DRAWS=4096
+
+# Build all already-cached pipelines at boot, increasing startup work and memory use.
+# This does not supply a shader cache or precompile shaders that have never been seen.
+# Remove this line to use recent-used-pipeline selection (or the 3000-pipeline limit
+# when no used-pipeline list exists).
+EDEN_NX2_PRELOAD_ALL_PIPELINES=1
