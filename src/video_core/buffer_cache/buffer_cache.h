@@ -2847,13 +2847,15 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             const GPUVAddr gpu_addr = key.gpu_addr;
             u32 size = [&]() {
                 const u32 memory_layout_size =
-                    static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+                    StorageMappingSize(gpu_memory->GetMemoryLayoutSize(gpu_addr));
                 // A pointer read from a table in memory is the base of an object pool, read anywhere in
-                // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
-                // its mapping, up to 64 MiB. The 8 MiB cap made those reads return 0 and culled every
-                // blade. Written pools keep the cap: a write marks the whole binding GPU-modified.
+                // it. Bound to the mapped extent, within the device limit and a 1 GiB ceiling:
+                // records such as distant light probes can be more than 64 MiB from the base.
+                // Written pools keep the cap: a write marks the whole binding GPU-modified.
                 if (table_pointer && !is_written) {
-                    return (std::min)(memory_layout_size, static_cast<u32>(64_MiB));
+                    return ReadOnlyTableStorageSize(memory_layout_size,
+                                                    runtime.GetMaxStorageBufferRange(),
+                                                    key.alignment, Core::DEVICE_PAGESIZE);
                 }
                 // A native (Switch 2) compute program's pointer is bare: the word after it is another
                 // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it as
@@ -2882,7 +2884,10 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // Alignment only applies to the offset of the buffer
             const u32 alignment = key.alignment;
             const GPUVAddr aligned_gpu_addr = Common::AlignDown(gpu_addr, alignment);
-            const u32 aligned_size = static_cast<u32>(gpu_addr - aligned_gpu_addr) + size;
+            const u64 aligned_size = gpu_addr - aligned_gpu_addr + size;
+            if (aligned_size > (std::numeric_limits<u32>::max)()) {
+                return NumericStorageBinding{};
+            }
 
             const std::optional<DAddr> aligned_device_addr = gpu_memory->GpuToCpuAddress(aligned_gpu_addr);
             if (!aligned_device_addr || size == 0) {
@@ -2895,14 +2900,14 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // The end address used for size calculation does not need to be aligned
             const DAddr cpu_end = Common::AlignUp(*device_addr + size, Core::DEVICE_PAGESIZE);
 
-            u32 binding_size = static_cast<u32>(cpu_end - *aligned_device_addr);
-            if (is_written) {
-                binding_size = aligned_size;
+            const u64 binding_size = is_written ? aligned_size : cpu_end - *aligned_device_addr;
+            if (binding_size > (std::numeric_limits<u32>::max)()) {
+                return NumericStorageBinding{};
             }
             const NumericStorageBinding binding{
                 .device_addr = *aligned_device_addr,
                 .gpu_addr = aligned_gpu_addr,
-                .size = binding_size,
+                .size = static_cast<u32>(binding_size),
             };
             return binding;
         });

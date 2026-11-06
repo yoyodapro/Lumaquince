@@ -199,6 +199,11 @@ Device::Device(Core::Frontend::EmuWindow& emu_window) {
     max_uniform_buffers = BuildMaxUniformBuffers();
     uniform_buffer_alignment = GetInteger<size_t>(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT);
     shader_storage_alignment = GetInteger<size_t>(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT);
+    // This limit can exceed signed 32-bit range. Query the actual implementation, rather than
+    // capping read-only pools at GL's minimum guarantee (128 MiB).
+    GLint64 storage_size{};
+    glGetInteger64v(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &storage_size);
+    max_shader_storage_buffer_size = static_cast<u64>((std::max)(storage_size, GLint64{0}));
     max_vertex_attributes = GetInteger<u32>(GL_MAX_VERTEX_ATTRIBS);
     max_varyings = GetInteger<u32>(GL_MAX_VARYING_VECTORS);
     max_compute_shared_memory_size = GetInteger<u32>(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE);

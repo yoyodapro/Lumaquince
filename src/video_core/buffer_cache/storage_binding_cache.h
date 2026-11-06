@@ -6,10 +6,34 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <limits>
 
 #include "common/common_types.h"
 
 namespace VideoCommon {
+
+constexpr u32 StorageMappingSize(u64 size) {
+    return static_cast<u32>((std::min)(size, u64{(std::numeric_limits<u32>::max)()}));
+}
+
+/// Adapted from jpkto's Lichii PR #351, commit 6aa59375402096a4ca4bd0a3ebfcac37f6d24877.
+/// Read-only table pools need their mapped extent, including records beyond 64 MiB. Reserve
+/// both alignment prefix and page-rounded end space so the final binding fits the host limit.
+constexpr u32 ReadOnlyTableStorageSize(u64 mapped_size, u64 host_limit, u32 alignment,
+                                     u64 page_size) {
+    if (alignment == 0 || page_size == 0) {
+        return 0;
+    }
+    const u64 reach = (std::min)(host_limit, u64{1} << 30);
+    if (alignment > reach || page_size > reach) {
+        return 0;
+    }
+    const u64 padding = u64{alignment - 1} + page_size - 1;
+    if (reach <= padding) {
+        return 0;
+    }
+    return static_cast<u32>((std::min)(mapped_size, reach - padding));
+}
 
 struct StorageBindingPolicy {
     bool written{};

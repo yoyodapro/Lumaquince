@@ -76,6 +76,9 @@ struct Runtime {
     u32 GetStorageBufferAlignment() const {
         return alignment;
     }
+    u64 GetMaxStorageBufferRange() const {
+        return max_storage_range;
+    }
     u32 GetUniformBufferAlignment() const {
         return uniform_alignment;
     }
@@ -162,6 +165,7 @@ struct Runtime {
         bool streamed;
     };
     u32 alignment{256};
+    u64 max_storage_range{u64{1} << 30};
     u32 uniform_alignment{1};
     u32 allocations{}, uploads{};
     u64 upload_bytes{};
@@ -512,11 +516,11 @@ TEST_CASE("Storage binding cache preserves native and table size policies", "[vi
     REQUIRE(f.Bind(false, true, false, false).size == 4096);
     REQUIRE(f.Bind(true, true, false, false).size == 256);
     REQUIRE(f.Bind(false, true).size == 8 << 20);
-    REQUIRE(f.Bind(false, false, true).size == 64 << 20);
+    REQUIRE(f.Bind(false, false, true).size == 80 << 20);
     REQUIRE(f.Bind(true, false, true).size == 256);
     f.Descriptor(base, (1ULL << 32) | 256);
     REQUIRE(f.Bind().size == 8 << 20);
-    REQUIRE(f.Bind(false, false, true).size == 64 << 20);
+    REQUIRE(f.Bind(false, false, true).size == 80 << 20);
     f.Descriptor(base + (79 << 20), 0);
     REQUIRE(f.Bind(false, false, true).size == 1 << 20);
 }
@@ -1268,5 +1272,55 @@ TEST_CASE("Resource decoding finishes before graphics and compute uniform descri
                     sizeof(bound_handle));
         CHECK(bound_handle == gpu_handle);
         CHECK(f.runtime.finishes == 1);
+    }
+}
+
+TEST_CASE("Read-only table pools reach distant records while writable spans stay bounded",
+          "[video_core][draw_preparation][storage_range]") {
+    Fixture f;
+    constexpr GPUVAddr base = 0x4000000;
+    constexpr DAddr physical = 0x10000000;
+    constexpr u32 pool_size = 160U << 20;
+    f.memory->Map(base, physical, pool_size, Tegra::PTEKind::PITCH, true);
+    f.Descriptor(base, 256);
+    const auto binding = f.Bind(false, false, true);
+    REQUIRE(binding.device_addr == physical);
+    REQUIRE(binding.size == pool_size);
+    // A 128-byte probe record beyond the old 64 MiB limit is inside the real binding.
+    CHECK((130U << 20) + 128 <= binding.size);
+    CHECK_FALSE(f.cache->IsRegionGpuModified(physical, pool_size));
+    CHECK(f.Bind(true, false, true).size == 256);
+    f.Descriptor(base, (u64{1} << 32) | 256);
+    CHECK(f.Bind(true, false, true).size == 8U << 20);
+    CHECK(f.Bind(false, false, true).size == pool_size);
+    CHECK_FALSE(f.cache->IsRegionGpuModified(physical, pool_size));
+
+    // Mapping continuity still bounds the pool, even if its kind/layout extent is larger.
+    f.memory->Map(base + (96U << 20), physical + (256U << 20), 64U << 20,
+                  Tegra::PTEKind::PITCH, true);
+    CHECK(f.Bind(false, false, true).size == 96U << 20);
+}
+
+TEST_CASE("Read-only table bindings including alignment padding fit actual host range",
+          "[video_core][draw_preparation][storage_range]") {
+    for (const u64 host_range : {u64{128} << 20, u64{256} << 20, u64{2} << 30}) {
+        for (const u32 alignment : {16U, 256U, 4096U, 65536U}) {
+            CAPTURE(host_range, alignment);
+            Fixture f;
+            f.runtime.max_storage_range = host_range;
+            f.runtime.alignment = alignment;
+            constexpr GPUVAddr base = 0x10000000;
+            constexpr DAddr physical = 0x20000000;
+            // Translation-only: no backing pool bytes or GPU allocation is needed.
+            f.memory->Map(base, physical, 1536U << 20, Tegra::PTEKind::PITCH, true);
+            f.Descriptor(base + alignment - 1, 0);
+            const auto binding = f.Bind(false, false, true);
+            CHECK(binding.device_addr == physical);
+            CHECK(binding.gpu_addr == base);
+            CHECK(binding.size <= (std::min)(host_range, u64{1} << 30));
+            CHECK(binding.size > (std::min)(host_range, u64{1} << 30) - 2 * 65536);
+            CHECK(binding.size % Core::DEVICE_PAGESIZE == 0);
+            CHECK_FALSE(f.cache->IsRegionGpuModified(physical, binding.size));
+        }
     }
 }

@@ -137,3 +137,37 @@ TEST_CASE("Storage binding cache has independent ownership and bounded replaceme
         }
     }
 }
+
+TEST_CASE("Storage mapping sizes saturate before narrowing and table budgets cannot wrap",
+          "[video_core][storage_binding_cache][storage_range]") {
+    using VideoCommon::ReadOnlyTableStorageSize;
+    using VideoCommon::StorageMappingSize;
+    constexpr u64 GiB = u64{1} << 30;
+    CHECK(StorageMappingSize(4 * GiB) == 0xffffffffU);
+    CHECK(StorageMappingSize(4 * GiB + 256) == 0xffffffffU);
+    CHECK(StorageMappingSize((std::numeric_limits<u64>::max)()) == 0xffffffffU);
+    CHECK(StorageMappingSize(160U << 20) == 160U << 20);
+    CHECK(ReadOnlyTableStorageSize(4 * GiB, 2 * GiB, 256, 4096) == GiB - 255 - 4095);
+    CHECK(ReadOnlyTableStorageSize(4 * GiB + 256, 2 * GiB, 256, 4096) > (130U << 20));
+    CHECK(ReadOnlyTableStorageSize(0, GiB, 256, 4096) == 0);
+    CHECK(ReadOnlyTableStorageSize(GiB, 0, 256, 4096) == 0);
+    CHECK(ReadOnlyTableStorageSize(GiB, 4096, 256, 4096) == 0);
+    CHECK(ReadOnlyTableStorageSize(GiB, 4350, 256, 4096) == 0);
+    CHECK(ReadOnlyTableStorageSize(GiB, 4351, 256, 4096) == 1);
+    CHECK(ReadOnlyTableStorageSize(GiB, GiB, 0, 4096) == 0);
+    CHECK(ReadOnlyTableStorageSize(GiB, GiB, 256, 0) == 0);
+    CHECK(ReadOnlyTableStorageSize(GiB, GiB, 256,
+                                   (std::numeric_limits<u64>::max)()) == 0);
+    // Exhaust all prefix/end padding combinations for small synthetic alignments. The full
+    // host descriptor range, not just the guest-visible payload, must fit the device limit.
+    for (u32 alignment : {1U, 4U, 16U}) {
+        for (u64 page : {1U, 4U, 16U}) {
+            const auto payload = ReadOnlyTableStorageSize(4096, 255, alignment, page);
+            for (u32 prefix = 0; prefix < alignment; ++prefix) {
+                for (u64 end_padding = 0; end_padding < page; ++end_padding) {
+                    CHECK(payload + prefix + end_padding <= 255);
+                }
+            }
+        }
+    }
+}
