@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <vector>
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/page_table.h"
@@ -72,7 +73,7 @@ struct Runtime {
         return alignment;
     }
     u32 GetUniformBufferAlignment() const {
-        return 1;
+        return uniform_alignment;
     }
     bool IsFree(u64) const {
         return true;
@@ -142,19 +143,29 @@ struct Runtime {
                     bool barrier) {
         CopyBuffer(dst, &src, copies, barrier, false);
     }
-    void BindUniformBuffer(Buffer&, u32, u32) {}
+    void BindUniformBuffer(Buffer& buffer, u32 offset, u32 size) {
+        REQUIRE(offset + size <= buffer.bytes.size());
+        uniform_bindings.push_back({std::span{buffer.bytes}.subspan(offset, size), false});
+    }
     std::span<u8> BindMappedUniformBuffer(size_t, u32, u32 size) {
-        stream.resize(size);
+        auto& stream = uniform_streams.emplace_back(size);
+        uniform_bindings.push_back({stream, true});
         return stream;
     }
 
+    struct UniformBinding {
+        std::span<const u8> bytes;
+        bool streamed;
+    };
     u32 alignment{256};
+    u32 uniform_alignment{1};
     u32 allocations{}, uploads{};
     u64 upload_bytes{};
     u32 downloads{}, finishes{}, waits{};
     u64 download_bytes{}, waited_tick{};
     std::unique_ptr<Buffer> staging;
-    std::vector<u8> stream;
+    std::vector<std::vector<u8>> uniform_streams;
+    std::vector<UniformBinding> uniform_bindings;
     std::vector<std::function<void()>> pending;
     std::function<void()> before_completion;
 };
@@ -259,6 +270,10 @@ struct BufferCacheTestAccess {
         channel.uniform_buffers[0][0] = {.device_addr = address, .size = size, .buffer_id = id};
         cache.BindHostGraphicsUniformBuffer(0, 0, 0, true);
     }
+    static void ComputeUniforms(Cache& cache, BufferCacheChannelInfo& channel) {
+        cache.channel_state = &channel;
+        cache.BindHostComputeUniformBuffers();
+    }
     static void CpuDirty(Cache& cache, DAddr address, u64 size) {
         cache.memory_tracker.MarkRegionAsCpuModified(address, size);
     }
@@ -336,6 +351,34 @@ struct Fixture {
     VideoCommon::Binding Bind(bool written = false, bool native = false, bool table = false,
                               bool mapping_size = true) {
         return Access::Bind(*cache, *memory, 0x100000, written, native, table, mapping_size);
+    }
+};
+
+struct UniformFixture : Fixture {
+    Tegra::Control::ChannelState state{0};
+    std::optional<VideoCommon::BufferCacheChannelInfo> channel;
+    VideoCommon::UniformBufferSizes graphics_sizes{};
+    VideoCommon::ComputeUniformBufferSizes compute_sizes{};
+
+    UniformFixture() {
+        state.memory_manager = &*memory;
+        state.payload.emplace(system, *memory, state);
+        channel.emplace(state);
+        channel->uniform_buffer_sizes = &graphics_sizes;
+        channel->compute_uniform_buffer_sizes = &compute_sizes;
+    }
+
+    void Bind(bool compute, VideoCommon::BufferId id, DAddr address, u32 size) {
+        if (compute) {
+            compute_sizes[0] = size;
+            channel->enabled_compute_uniform_buffer_mask = 1;
+            channel->compute_uniform_buffers[0] = {
+                .device_addr = address, .size = size, .buffer_id = id};
+            Access::ComputeUniforms(*cache, *channel);
+        } else {
+            graphics_sizes[0][0] = size;
+            Access::Uniform(*cache, *channel, id, address, size);
+        }
     }
 };
 
@@ -538,6 +581,170 @@ TEST_CASE("Direct native uniform refresh retains immediate-upload barrier bookke
     Access::Uniform(*cache, channel, id, 0x20000, 0x10000);
     REQUIRE(Access::UploadBarrierPending(*cache));
     REQUIRE(Access::Get(*cache, id).bytes[0xffff] == 0x42);
+}
+
+TEST_CASE("Small uniform bindings preserve GPU spans on a CPU-untracked page",
+          "[video_core][draw_preparation][uniform_coherency]") {
+    for (const bool compute : {false, true}) {
+        CAPTURE(compute);
+        UniformFixture f;
+        f.runtime.uniform_alignment = 256;
+        const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+        auto& host = Access::Get(*f.cache, id).bytes;
+        std::memset(f.bytes + 0x10000, 0x11, 0x10000);
+        std::fill_n(host.begin() + 0x40, 16, 0xc7);
+        Access::Dirty(*f.cache, 0x20040, 16);
+        std::memset(f.bytes + 0x10080, 0x22, 16);
+        Access::CpuDirty(*f.cache, 0x20080, 16);
+        REQUIRE_FALSE(Access::TrackerGpuDirty(*f.cache, 0x20000, 256));
+        REQUIRE(f.cache->IsRegionGpuModified(0x20040, 16));
+
+        std::vector<u8> expected(256, 0x11);
+        std::fill_n(expected.begin() + 0x40, 16, 0xc7);
+        std::fill_n(expected.begin() + 0x80, 16, 0x22);
+        f.Bind(compute, id, 0x20000, 256);
+        REQUIRE(f.runtime.uniform_bindings.size() == 1);
+        CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+        CHECK_FALSE(f.runtime.uniform_bindings.back().streamed);
+        CHECK(f.cache->IsRegionGpuModified(0x20040, 16));
+        CHECK(f.bytes[0x10040] == 0x11); // The aligned host binding needs no readback.
+        CHECK(f.runtime.downloads == 0);
+        CHECK(f.runtime.finishes == 0);
+
+        // A later partial CPU update must preserve the same GPU-owned bytes again.
+        std::memset(f.bytes + 0x10080, 0x33, 16);
+        Access::CpuDirty(*f.cache, 0x20080, 16);
+        std::fill_n(expected.begin() + 0x80, 16, 0x33);
+        f.Bind(compute, id, 0x20000, 256);
+        REQUIRE(f.runtime.uniform_bindings.size() == 2);
+        CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+        CHECK(f.runtime.downloads == 0);
+    }
+}
+
+TEST_CASE("Unaligned uniform streams reconcile GPU bytes without overwriting CPU writes",
+          "[video_core][draw_preparation][uniform_coherency]") {
+    for (const bool compute : {false, true}) {
+        for (const bool cpu_untracked : {false, true}) {
+            CAPTURE(compute, cpu_untracked);
+            UniformFixture f;
+            f.runtime.uniform_alignment = 256;
+            const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+            auto& host = Access::Get(*f.cache, id).bytes;
+            std::memset(f.bytes + 0x10000, 0x11, 0x10000);
+            std::ranges::fill(host, 0x11);
+            std::fill_n(host.begin() + 0x50, 16, 0xc7);
+            Access::Dirty(*f.cache, 0x20050, 16);
+            std::vector<u8> expected(256, 0x11);
+            std::fill_n(expected.begin() + 0x40, 16, 0xc7);
+            if (cpu_untracked) {
+                std::memset(f.bytes + 0x10090, 0x22, 16);
+                Access::CpuDirty(*f.cache, 0x20090, 16);
+                std::fill_n(expected.begin() + 0x80, 16, 0x22);
+            }
+            REQUIRE(Access::TrackerGpuDirty(*f.cache, 0x20010, 256) == !cpu_untracked);
+            REQUIRE(f.cache->IsRegionGpuModified(0x20050, 16));
+            f.runtime.before_completion = [&] {
+                CHECK(f.bytes[0x10050] == 0x11); // Do not publish before completion.
+                if (cpu_untracked) {
+                    CHECK(f.bytes[0x10090] == 0x22);
+                }
+            };
+
+            f.Bind(compute, id, 0x20010, 256);
+            REQUIRE(f.runtime.uniform_bindings.size() == 1);
+            CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+            CHECK(f.runtime.uniform_bindings.back().streamed);
+            CHECK(f.runtime.download_bytes == 16);
+            CHECK(f.runtime.finishes == 1);
+            CHECK_FALSE(Access::Pending(*f.cache, 0x20050, 16));
+            CHECK(f.bytes[0x1000f] == 0x11);
+            CHECK(f.bytes[0x10110] == 0x11);
+
+            // Rebinding coherent bytes keeps the stream path without another readback.
+            f.runtime.before_completion = {};
+            f.Bind(compute, id, 0x20010, 256);
+            REQUIRE(f.runtime.uniform_bindings.size() == 2);
+            CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+            CHECK(f.runtime.download_bytes == 16);
+            CHECK(f.runtime.finishes == 1);
+
+            // A new GPU write after that bind must not reuse the previous CPU contents.
+            std::fill_n(host.begin() + 0x50, 16, 0xd3);
+            Access::Dirty(*f.cache, 0x20050, 16);
+            std::fill_n(expected.begin() + 0x40, 16, 0xd3);
+            f.Bind(compute, id, 0x20010, 256);
+            CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+            CHECK(f.runtime.download_bytes == 32);
+            CHECK(f.runtime.finishes == 2);
+        }
+    }
+}
+
+TEST_CASE("CPU-owned uniforms retain streaming without uploads or GPU waits",
+          "[video_core][draw_preparation][uniform_coherency]") {
+    for (const bool compute : {false, true}) {
+        for (const u32 offset : {0U, 16U}) {
+            CAPTURE(compute, offset);
+            UniformFixture f;
+            f.runtime.uniform_alignment = 256;
+            const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+            std::memset(f.bytes + 0x10000, 0x42, 0x10000);
+            std::vector<u8> expected(256, 0x42);
+            f.Bind(compute, id, 0x20000 + offset, 256);
+            REQUIRE(f.runtime.uniform_bindings.size() == 1);
+            CHECK(f.runtime.uniform_bindings.back().streamed);
+            CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+            // Native CPU writes may bypass tracking; the stream must still read current bytes.
+            f.bytes[0x10000 + offset + 3] = 0x91;
+            expected[3] = 0x91;
+            f.Bind(compute, id, 0x20000 + offset, 256);
+            REQUIRE(f.runtime.uniform_bindings.size() == 2);
+            CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+            CHECK(f.runtime.uploads == 0);
+            CHECK(f.runtime.downloads == 0);
+            CHECK(f.runtime.finishes == 0);
+            CHECK(f.runtime.waits == 0);
+        }
+    }
+}
+
+TEST_CASE("Compute uniforms append mixed streamed and cached bindings in enabled-slot order",
+          "[video_core][draw_preparation][uniform_coherency]") {
+    UniformFixture f;
+    f.runtime.uniform_alignment = 256;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& host = Access::Get(*f.cache, id).bytes;
+    constexpr std::array<u32, 4> slots{0, 2, 5, 7};
+    constexpr std::array<u32, 4> offsets{0, 0x1000, 0x3000, 0x4000};
+    constexpr std::array<u32, 4> sizes{256, 8192, 256, 256};
+    constexpr std::array<u8, 4> values{0x11, 0x22, 0x33, 0x44};
+    constexpr std::array<bool, 4> streamed{true, false, true, false};
+    for (size_t index = 0; index < slots.size(); ++index) {
+        const u32 slot = slots[index];
+        f.compute_sizes[slot] = sizes[index];
+        f.channel->enabled_compute_uniform_buffer_mask |= 1U << slot;
+        f.channel->compute_uniform_buffers[slot] = {
+            .device_addr = 0x20000 + offsets[index], .size = sizes[index], .buffer_id = id};
+        if (streamed[index]) {
+            std::memset(f.bytes + 0x10000 + offsets[index], values[index], sizes[index]);
+        } else {
+            std::fill_n(host.begin() + offsets[index], sizes[index], values[index]);
+            Access::Dirty(*f.cache, 0x20000 + offsets[index], sizes[index]);
+        }
+    }
+    Access::ComputeUniforms(*f.cache, *f.channel);
+    REQUIRE(f.runtime.uniform_bindings.size() == slots.size());
+    for (size_t index = 0; index < slots.size(); ++index) {
+        CAPTURE(index);
+        const auto& bound = f.runtime.uniform_bindings[index];
+        CHECK(bound.streamed == streamed[index]);
+        REQUIRE(bound.bytes.size() == sizes[index]);
+        CHECK(std::ranges::all_of(bound.bytes, [&](u8 value) { return value == values[index]; }));
+    }
+    CHECK(f.runtime.uploads == 0);
+    CHECK(f.runtime.downloads == 0);
+    CHECK(f.runtime.finishes == 0);
 }
 
 TEST_CASE("Buffer downloads clip cross-buffer requests before clearing dirty pages",
