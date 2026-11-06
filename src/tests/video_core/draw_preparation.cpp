@@ -268,10 +268,28 @@ struct BufferCacheTestAccess {
         cache.maxwell3d = &channel.maxwell3d;
         cache.gpu_memory = &channel.gpu_memory;
         channel.uniform_buffers[0][0] = {.device_addr = address, .size = size, .buffer_id = id};
+        channel.enabled_uniform_buffer_masks[0] = 1;
+        cache.UpdateUniformBuffers(0);
         cache.BindHostGraphicsUniformBuffer(0, 0, 0, true);
     }
     static void ComputeUniforms(Cache& cache, BufferCacheChannelInfo& channel) {
         cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.kepler_compute = &channel.kepler_compute;
+        cache.gpu_memory = &channel.gpu_memory;
+        auto& launch = channel.kepler_compute.launch_description;
+        launch.const_buffer_enable_mask.Assign(channel.enabled_compute_uniform_buffer_mask);
+        for (u32 index = 0; index < NUM_COMPUTE_UNIFORM_BUFFERS; ++index) {
+            if ((channel.enabled_compute_uniform_buffer_mask & (1U << index)) == 0) {
+                continue;
+            }
+            const Binding& binding = channel.compute_uniform_buffers[index];
+            auto& config = launch.const_buffer_config[index];
+            config.address_low = static_cast<u32>(binding.device_addr);
+            config.address_high.Assign(static_cast<u32>(binding.device_addr >> 32));
+            config.size.Assign(binding.size);
+        }
+        cache.UpdateComputeUniformBuffers();
         cache.BindHostComputeUniformBuffers();
     }
     static void CpuDirty(Cache& cache, DAddr address, u64 size) {
@@ -361,6 +379,7 @@ struct UniformFixture : Fixture {
     VideoCommon::ComputeUniformBufferSizes compute_sizes{};
 
     UniformFixture() {
+        memory->Map(0x20000, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
         state.memory_manager = &*memory;
         state.payload.emplace(system, *memory, state);
         channel.emplace(state);
@@ -706,6 +725,42 @@ TEST_CASE("CPU-owned uniforms retain streaming without uploads or GPU waits",
             CHECK(f.runtime.finishes == 0);
             CHECK(f.runtime.waits == 0);
         }
+    }
+}
+
+TEST_CASE("Unaligned uniform readback preserves a newer CPU overwrite of GPU bytes",
+          "[video_core][draw_preparation][uniform_coherency]") {
+    for (const bool compute : {false, true}) {
+        CAPTURE(compute);
+        UniformFixture f;
+        f.runtime.uniform_alignment = 256;
+        const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+        auto& host = Access::Get(*f.cache, id).bytes;
+        std::memset(f.bytes + 0x10000, 0x11, 0x10000);
+        std::ranges::fill(host, 0x11);
+        std::fill_n(host.begin() + 0x50, 32, 0xc7);
+        Access::Dirty(*f.cache, 0x20050, 32);
+
+        // A CPU/service write cancels only its exact bytes, leaving GPU ownership on both sides.
+        std::memset(f.bytes + 0x10058, 0x92, 16);
+        f.cache->WriteMemory(0x20058, 16, false);
+        REQUIRE_FALSE(f.cache->IsRegionGpuModified(0x20058, 16));
+        REQUIRE(f.cache->IsRegionGpuModified(0x20050, 8));
+        REQUIRE(f.cache->IsRegionGpuModified(0x20068, 8));
+        REQUIRE_FALSE(Access::TrackerGpuDirty(*f.cache, 0x20010, 256));
+
+        std::vector<u8> expected(256, 0x11);
+        std::fill_n(expected.begin() + 0x40, 32, 0xc7);
+        std::fill_n(expected.begin() + 0x48, 16, 0x92);
+        f.Bind(compute, id, 0x20010, 256);
+        REQUIRE(f.runtime.uniform_bindings.size() == 1);
+        CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
+        CHECK(f.runtime.uniform_bindings.back().streamed);
+        CHECK(f.runtime.download_bytes == 16);
+        CHECK(f.runtime.finishes == 1);
+        CHECK_FALSE(Access::Pending(*f.cache, 0x20050, 32));
+        CHECK(std::ranges::all_of(std::span{f.bytes + 0x10058, 16},
+                                  [](u8 value) { return value == 0x92; }));
     }
 }
 
