@@ -1262,7 +1262,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     }
     const bool use_fast_buffer = needs_alignment_stream
         || (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size
-            && !memory_tracker.IsRegionGpuModified(device_addr, size));
+            && !IsRegionGpuModified(device_addr, size));
     if (use_fast_buffer) {
         if constexpr (IS_OPENGL) {
             if (runtime.HasFastBufferSubData()) {
@@ -1539,7 +1539,7 @@ void BufferCache<P>::BindHostComputeUniformBuffers() {
         const bool use_fast_buffer =
             needs_alignment_stream ||
             (has_host_buffer && size <= channel_state->uniform_buffer_skip_cache_size &&
-             !memory_tracker.IsRegionGpuModified(binding.device_addr, size));
+             !IsRegionGpuModified(binding.device_addr, size));
         if constexpr (!IS_OPENGL) {
             if (use_fast_buffer) {
                 const std::span<u8> span =
@@ -1770,22 +1770,43 @@ void BufferCache<P>::UpdateDrawIndirect() {
 }
 
 template <class P>
+void BufferCache<P>::SynchronizeUnalignedUniformBuffer(const Binding& binding, u32 size) {
+    if constexpr (!IS_OPENGL) {
+        if (binding.buffer_id == NULL_BUFFER_ID || size == 0) {
+            return;
+        }
+        const u32 alignment = runtime.GetUniformBufferAlignment();
+        Buffer& buffer = slot_buffers[binding.buffer_id];
+        if (alignment <= 1 || buffer.Offset(binding.device_addr) % alignment == 0 ||
+            !IsRegionGpuModified(binding.device_addr, size)) {
+            return;
+        }
+        // Unaligned bindings stream from CPU memory. Upload CPU-owned bytes to unmask the page
+        // tracker without replacing precise GPU spans, then complete those spans' readback.
+        // Do this during preparation: a readback can submit, invalidating geometry state and
+        // retiring stream allocations if any of this draw's descriptors were already bound.
+        SynchronizeBuffer(buffer, binding.device_addr, size);
+        DownloadBufferMemory(buffer, binding.device_addr, size);
+    }
+}
+
+template <class P>
 void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
     if (channel_state->enabled_uniform_buffer_masks[stage] == 0) [[likely]] {
         return;
     }
     ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
         Binding& binding = channel_state->uniform_buffers[stage][index];
-        if (binding.buffer_id) {
-            // Already updated
-            return;
+        if (!binding.buffer_id) {
+            // Mark as dirty
+            if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
+                channel_state->dirty_uniform_buffers[stage] |= 1U << index;
+            }
+            // Resolve buffer
+            binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         }
-        // Mark as dirty
-        if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
-            channel_state->dirty_uniform_buffers[stage] |= 1U << index;
-        }
-        // Resolve buffer
-        binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+        SynchronizeUnalignedUniformBuffer(
+            binding, (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]));
     });
 }
 
@@ -1858,6 +1879,8 @@ void BufferCache<P>::UpdateComputeUniformBuffers() {
             }
         }
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+        SynchronizeUnalignedUniformBuffer(
+            binding, (std::min)(binding.size, (*channel_state->compute_uniform_buffer_sizes)[index]));
     });
 }
 
@@ -2326,7 +2349,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
     constexpr bool use_optimized_vertex_buffers = true;
 #endif
 
-    if (use_optimized_vertex_buffers) {
+    if (use_optimized_vertex_buffers || IsRegionGpuModified(device_addr, size)) {
         upload_copies.clear();
         u64 total_size_bytes = 0;
         u64 largest_copy = 0;

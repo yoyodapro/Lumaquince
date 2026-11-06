@@ -517,6 +517,8 @@ private:
 
     void UpdateUniformBuffers(size_t stage);
 
+    void SynchronizeUnalignedUniformBuffer(const Binding& binding, u32 size);
+
     void UpdateStorageBuffers(size_t stage);
 
     void UpdateTextureBuffers(size_t stage);
