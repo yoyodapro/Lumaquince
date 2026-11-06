@@ -678,24 +678,35 @@ TEST_CASE("Unaligned uniform streams reconcile GPU bytes without overwriting CPU
                 }
             };
             const auto describe_mismatch = [&] {
-                std::ostringstream message;
                 const auto bound = f.runtime.uniform_bindings.back().bytes;
+                if (std::ranges::equal(bound, expected)) {
+                    return std::string{"no mismatch"};
+                }
+                // Freeze the first failure's bytes before an extra cached read or formatting.
+                std::array<u8, 256> bound_snapshot{}, cpu_snapshot{}, device_snapshot{};
+                const size_t copied = (std::min)(bound.size(), bound_snapshot.size());
+                std::copy_n(bound.begin(), copied, bound_snapshot.begin());
+                std::copy_n(f.bytes + 0x10010, cpu_snapshot.size(), cpu_snapshot.begin());
                 const auto* current_device = f.device.GetPointer<u8>(0x20010);
+                if (current_device) {
+                    std::copy_n(current_device, device_snapshot.size(), device_snapshot.begin());
+                }
                 std::array<u8, 256> cached_read{};
                 f.device.ReadBlockUnsafe(0x20010, cached_read.data(), cached_read.size());
+                std::ostringstream message;
                 message << "bound_size=" << bound.size() << " expected_size=" << expected.size()
                         << " device_pointer_matches_cpu="
                         << (current_device == f.bytes + 0x10010);
                 size_t mismatches = 0;
-                for (size_t index = 0; index < (std::min)(bound.size(), expected.size()); ++index) {
-                    if (bound[index] == expected[index]) {
+                for (size_t index = 0; index < (std::min)(copied, expected.size()); ++index) {
+                    if (bound_snapshot[index] == expected[index]) {
                         continue;
                     }
                     if (mismatches++ < 8) {
-                        message << " [index=" << index << " bound=" << u32{bound[index]}
+                        message << " [index=" << index << " bound=" << u32{bound_snapshot[index]}
                                 << " expected=" << u32{expected[index]}
-                                << " cpu=" << u32{f.bytes[0x10010 + index]}
-                                << " device=" << (current_device ? int{current_device[index]} : -1)
+                                << " cpu=" << u32{cpu_snapshot[index]}
+                                << " device=" << (current_device ? int{device_snapshot[index]} : -1)
                                 << " cached=" << u32{cached_read[index]} << ']';
                     }
                 }
