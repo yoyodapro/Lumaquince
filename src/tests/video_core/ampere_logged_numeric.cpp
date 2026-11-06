@@ -570,13 +570,16 @@ TEST_CASE("Native LOP3 non-register B forms preserve shadowed operands and value
     for (const u32 opcode : {0xa12U, 0xc12U, 0x812U}) {
         const u32 source_b = opcode == 0xa12 ? (cbuf_bank << 22) | (cbuf_offset << 6)
                              : opcode == 0xc12 ? 23U : value_b;
+        // Bit 91 belongs to the uniform form. Constant-buffer operands require it clear,
+        // as in the existing native LOP3 constant-buffer trap-guard fixture.
+        const u32 source_flags = opcode == 0xc12 ? 0x08000000U : 0U;
         for (const auto& regs : operands) {
             const auto [destination, a, c] = regs;
             for (const bool enabled : {true, false}) {
                 const u32 guard = enabled ? 7U : 15U; // PT and !PT.
                 const Instruction instruction{{opcode | (guard << 12) | (destination << 16) |
                                                    (a << 24),
-                                               source_b, 0x0f8e9600U | c, 0}};
+                                               source_b, 0x078e9600U | source_flags | c, 0}};
                 CAPTURE(opcode, destination, a, c, enabled);
                 const auto lowered = LowerToMaxwell(std::array{uniform_marker, instruction, Exit});
                 INFO(lowered.error);
@@ -586,6 +589,7 @@ TEST_CASE("Native LOP3 non-register B forms preserve shadowed operands and value
                     REQUIRE(pressure.valid);
                     // B is not a GPR, including the immediate's high-looking low byte.
                     CHECK(pressure.instruction.words[1] == source_b);
+                    CHECK(pressure.instruction.Bits(91, 1) == (opcode == 0xc12 ? 1U : 0U));
                     CHECK(pressure.instruction.Bits(72, 8) == 0x96);
                     CHECK(pressure.instruction.Bits(12, 4) == guard);
                 }
