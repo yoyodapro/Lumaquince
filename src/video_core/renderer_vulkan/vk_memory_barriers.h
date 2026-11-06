@@ -3,9 +3,7 @@
 #pragma once
 
 #include <utility>
-#include <vulkan/vulkan.h>
-
-#include "video_core/vulkan_common/vulkan_wrapper.h"
+#include <vulkan/vulkan_core.h>
 
 namespace Vulkan {
 
@@ -33,7 +31,8 @@ void RecordComputeReadBarrier(CommandBuffer cmdbuf) {
         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
     };
-    cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
+    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT |
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            0, barrier);
