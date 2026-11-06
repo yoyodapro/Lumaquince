@@ -9,6 +9,11 @@ These notes describe the reviewed source and its development predecessor. See th
 
 ## Rendering
 
+- Development gameplay has also reported excessive sky glare, glowing stretched triangles and
+  black character/enemy materials. A short successful replay does not close these reports;
+  verify affected scenes again for each candidate. The broader changes and open renderer work
+  are described in [rendering quality](docs/rendering-quality.md).
+
 - Water strobing remains visible at Lake Hylia in Ocarina of Time. The cause has not been conclusively isolated.
 - Invalid texture bindings remain in the predecessor's Vulkan validation log: a color-format/depth-comparison mismatch and a floating-point versus unsigned-integer image-type mismatch. Complete lighting and color correctness are not established.
 - GPU-dependent texture selection through storage buffers, loops or per-fragment values is unfinished. A CPU per-draw fallback cannot represent every such selection.

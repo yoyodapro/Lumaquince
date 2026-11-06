@@ -6,6 +6,22 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 
 ## [Unreleased]
 
+- Reconcile GPU-produced texture handles, image/sampler descriptors and storage pointers before
+  resolving draw and dispatch bindings; preserve CPU-owned bytes during readback.
+- Check feedback barriers against each draw's current sampled views.
+- Keep dynamic topology and primitive restart consistent with actual tessellation stages and
+  restore state across mesh and ordinary pipeline transitions.
+- Retain warm graphics pipelines while driver memory has room, with a separate retained-count
+  guard that resumes conservative age trimming.
+- Bind read-only table pools beyond the old 64 MiB cap within actual device and mapping limits,
+  including alignment and page-padding bounds. Adapted from Lichii PR 351 by jpkto.
+- Preserve fence-flagged query-report lifetime and wait for GPU completion before publication,
+  including payload, non-async and direct-flush paths. Adapted from Lichii PR 337.
+
+These development changes require exact-build native checks and gameplay review. They do not
+establish complete rendering correctness, a measured speedup or whole-game compatibility.
+See `docs/rendering-quality.md` for scope and remaining work.
+
 ## [0.1.0]
 
 - Initial release candidate
