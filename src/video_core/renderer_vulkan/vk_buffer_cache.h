@@ -134,6 +134,10 @@ public:
 
     void Finish();
 
+    /// Publish device writes to coherent host mappings and wait for that dependency.
+    /// Scheduler-owner only, like Finish; not a substitute for WaitSubmittedTick.
+    void FinishForHostRead();
+
     u64 GetDeviceLocalMemory() const;
 
     u64 GetDeviceMemoryUsage() const;

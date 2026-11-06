@@ -128,6 +128,13 @@ struct Runtime {
         pending.clear();
         ++finishes;
     }
+    void FinishForHostRead() {
+        ++host_read_finishes;
+        Finish();
+        if (publish_host_writes) {
+            publish_host_writes();
+        }
+    }
     void Wait(u64 tick) {
         if (before_completion) {
             before_completion();
@@ -169,13 +176,14 @@ struct Runtime {
     u32 uniform_alignment{1};
     u32 allocations{}, uploads{};
     u64 upload_bytes{};
-    u32 downloads{}, finishes{}, waits{};
+    u32 downloads{}, finishes{}, waits{}, host_read_finishes{};
     u64 download_bytes{}, waited_tick{};
     std::unique_ptr<Buffer> staging;
     std::vector<std::vector<u8>> uniform_streams;
     std::vector<UniformBinding> uniform_bindings;
     std::vector<std::function<void()>> pending;
     std::function<void()> before_completion;
+    std::function<void()> publish_host_writes;
 };
 
 struct Tracker : VideoCommon::MemoryTrackerBase<Tegra::MaxwellDeviceMemoryManager> {
@@ -262,6 +270,9 @@ struct BufferCacheTestAccess {
     }
     static void Download(Cache& cache, std::span<const std::pair<DAddr, u64>> ranges) {
         cache.DownloadRangesMemory(ranges);
+    }
+    static void DownloadSingle(Cache& cache, BufferId id, DAddr address, u64 size) {
+        cache.DownloadBufferMemory(cache.slot_buffers[id], address, size);
     }
     static void EvictionDownload(Cache& cache, std::span<const VideoCommon::BufferId> ids) {
         cache.DownloadBuffersMemory(ids);
@@ -984,7 +995,8 @@ TEST_CASE("Buffer downloads clip cross-buffer requests before clearing dirty pag
     SECTION("Host-coherent buffers need no staging allocation") {
         check(*f.cache, true);
         CHECK(f.runtime.allocations == 0);
-        CHECK(f.runtime.waits == 1);
+        CHECK(f.runtime.waits == 0);
+        CHECK(f.runtime.host_read_finishes == 1);
     }
     SECTION("Immediate-download backend also clips each buffer") {
         auto cache = std::make_unique<ImmediateDownloadCache>(f.device, f.runtime);
@@ -994,7 +1006,7 @@ TEST_CASE("Buffer downloads clip cross-buffer requests before clearing dirty pag
     }
 }
 
-TEST_CASE("Mapped buffer eviction waits for the latest usage before publishing guest bytes",
+TEST_CASE("Mapped buffer eviction waits for host visibility before publishing guest bytes",
           "[video_core][draw_preparation][buffer_download]") {
     Fixture f;
     const auto first = Access::Add(*f.cache, 0x10000, 0x10000, true);
@@ -1006,6 +1018,7 @@ TEST_CASE("Mapped buffer eviction waits for the latest usage before publishing g
     Access::Dirty(*f.cache, 0x10040, 16);
     Access::Dirty(*f.cache, 0x30080, 16);
     f.runtime.before_completion = [&] {
+        CHECK(f.runtime.host_read_finishes == 1);
         CHECK(f.bytes[0x40] == 0);
         CHECK(f.bytes[0x20080] == 0);
         std::fill_n(a.bytes.begin() + 0x40, 16, 0x13);
@@ -1013,8 +1026,9 @@ TEST_CASE("Mapped buffer eviction waits for the latest usage before publishing g
     };
     const std::array ids{first, second};
     Access::EvictionDownload(*f.cache, ids);
-    CHECK(f.runtime.waited_tick == 67);
-    CHECK(f.runtime.waits == 1);
+    CHECK(f.runtime.host_read_finishes == 1);
+    CHECK(f.runtime.finishes == 1);
+    CHECK(f.runtime.waits == 0);
     CHECK(f.runtime.allocations == 0);
     CHECK(f.runtime.downloads == 0);
     CHECK(f.bytes[0x40] == 0x13);
@@ -1042,6 +1056,7 @@ TEST_CASE("Mixed staged and coherent readback publishes only after batch complet
     };
     f.cache->DownloadMemory(0x10000, 0x30000);
     CHECK(f.runtime.finishes == 1);
+    CHECK(f.runtime.host_read_finishes == 1);
     CHECK(f.runtime.waits == 0);
     CHECK(f.runtime.allocations == 1);
     CHECK(f.runtime.download_bytes == 16);
@@ -1088,6 +1103,51 @@ TEST_CASE("Batched downloads preserve newer CPU bytes alongside pending GPU data
         CHECK(f.bytes[0x10000 + i] == (i >= 0x50 && i < 0x60 ? 0x79 : 0x68));
     }
     CHECK_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+}
+
+TEST_CASE("Mapped readback publishes host-visible GPU bytes and preserves newer CPU bytes",
+          "[video_core][draw_preparation][buffer_download][host_read]") {
+    for (const bool single : {false, true}) {
+        CAPTURE(single);
+        Fixture f;
+        const auto id = Access::Add(*f.cache, 0x20000, 0x10000, true);
+        auto& buffer = Access::Get(*f.cache, id);
+        // An old usage tick being complete does not make future mapped reads visible.
+        buffer.tick = 0;
+        std::fill_n(buffer.bytes.begin() + 0x40, 64, 0x11);
+        Access::Dirty(*f.cache, 0x20040, 64);
+        std::memset(f.bytes + 0x10050, 0x79, 16);
+        f.cache->WriteMemory(0x20050, 16, false);
+        Access::Synchronize(*f.cache, id, 0x20000, 0x1000);
+        f.runtime.before_completion = [&] {
+            CHECK(f.bytes[0x10040] == 0);
+            CHECK(f.bytes[0x10050] == 0x79);
+        };
+        // The fake backend exposes writes only after the explicit host-read completion.
+        // This verifies production BufferCache routing, not Vulkan driver visibility.
+        f.runtime.publish_host_writes = [&] {
+            std::fill_n(buffer.bytes.begin() + 0x40, 64, 0x68);
+        };
+        if (single) {
+            Access::DownloadSingle(*f.cache, id, 0x20000, 0x1000);
+        } else {
+            const std::array<std::pair<DAddr, u64>, 3> ranges{{
+                {0x20000, 0}, {0x20000, 0x1000}, {0x20000, 0x1000},
+            }};
+            Access::Download(*f.cache, ranges);
+            Access::Download(*f.cache, ranges); // Clean repeats need no extra submission.
+        }
+        CHECK(f.runtime.host_read_finishes == 1);
+        CHECK(f.runtime.finishes == 1);
+        CHECK(f.runtime.waits == 0);
+        CHECK(f.runtime.allocations == 0);
+        for (size_t i = 0x40; i < 0x80; ++i) {
+            CHECK(f.bytes[0x10000 + i] == (i >= 0x50 && i < 0x60 ? 0x79 : 0x68));
+        }
+        CHECK(f.bytes[0x1003f] == 0);
+        CHECK(f.bytes[0x10080] == 0);
+        CHECK_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
+    }
 }
 
 TEST_CASE("Device block-read translations do not survive manager lifetime reuse",
