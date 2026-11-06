@@ -1070,7 +1070,7 @@ void PipelineCache::EvictUnusedPipelines() {
     if (device.CanReportMemoryUsage() &&
         VideoCommon::CanRetainUnusedPipelines(device.GetDeviceMemoryUsage(),
                                              device.GetDeviceMemoryBudget(),
-                                             device.GetDeviceMemorySlack())) {
+                                             device.GetDeviceMemorySlack(), graphics_cache.size())) {
         return;
     }
     constexpr u64 EvictAfterFrames = 9000;

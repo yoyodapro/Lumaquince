@@ -19,9 +19,13 @@ inline constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
 // slack also occupies the heap, so reserve it before deciding whether a cache trim is needed.
 // Unknown budgets retain the conservative age-based policy. Subtraction avoids overflowing on
 // corrupt or transient driver values.
-inline bool CanRetainUnusedPipelines(u64 usage, u64 budget, u64 slack) {
+inline constexpr size_t MaxWarmGraphicsPipelines = 16384;
+
+inline bool CanRetainUnusedPipelines(u64 usage, u64 budget, u64 slack, size_t resident_count) {
     constexpr u64 MaxReserve = 512ULL * 1024 * 1024;
-    if (budget == 0 || usage >= budget) {
+    // Driver pipeline objects also retain host allocations which the VRAM budget omits.
+    // Above this count resume age-based trimming even if the GPU still has headroom.
+    if (resident_count > MaxWarmGraphicsPipelines || budget == 0 || usage >= budget) {
         return false;
     }
     const u64 available = budget - usage;
