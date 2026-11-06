@@ -399,18 +399,27 @@ TEST_CASE("GPU split zero-spin back wakes on publication and preserves coherent 
     REQUIRE(split.SetSpinBudgets({0, 0, 0}));
     Access::StartBack(split, system);
     bool parked = true;
+    int first_unobserved_iteration = -1;
     size_t calls{};
     for (int i = 0; i < 64; ++i) {
         const auto deadline = std::chrono::steady_clock::now() + 2s;
-        while (!Access::BackWaiting(split) && std::chrono::steady_clock::now() < deadline) {
+        bool observed_parked = false;
+        while (!(observed_parked = Access::BackWaiting(split)) &&
+               std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();
         }
-        parked &= Access::BackWaiting(split);
+        // A pending idle-hook request may legitimately end this wait window. Retain the
+        // successful observation instead of requiring a second load to remain true.
+        parked &= observed_parked;
+        if (!observed_parked && first_unobserved_iteration == -1) {
+            first_unobserved_iteration = i;
+        }
         split.Defer([&calls] { ++calls; });
         split.Publish();
         split.Drain();
     }
     split.Stop();
+    CAPTURE(first_unobserved_iteration);
     REQUIRE(parked);
     REQUIRE(calls == 64);
     REQUIRE(Access::Reset(split));
