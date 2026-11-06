@@ -6,6 +6,11 @@ New entries go under `## [Unreleased]`; `tools/ci/bump-version.sh` turns them in
 
 ## [Unreleased]
 
+- Selectively adapt Lichii PRs 295, 290, 194 and 184: alignment-safe storage accesses,
+  compute/indirect/graphics and mapped-host-read ordering, worker cancellation wakeups,
+  owned native graphics emission jobs and bounded cached-pipeline prebuilding.
+  Preserve native draws, existing cache versions and local resource/state fixes.
+  See `docs/nx2/async-native-pipelines.md` and `docs/rendering-quality.md` for limits.
 - Reconcile GPU-produced texture handles, image/sampler descriptors and storage pointers before
   resolving draw and dispatch bindings; preserve CPU-owned bytes during readback.
 - Check feedback barriers against each draw's current sampled views.
