@@ -1472,7 +1472,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
         buffer_cache.DownloadMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::QueryCache))) {
-        query_cache.FlushRegion(addr, size);
+        FlushQueryResults(addr, size);
     }
 }
 

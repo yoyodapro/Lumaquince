@@ -28,6 +28,7 @@
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/query_cache/query_base.h"
 #include "video_core/query_cache/query_cache_base.h"
+#include "video_core/query_cache/query_report_fence.h"
 #include "video_core/query_cache/query_stream.h"
 #include "video_core/query_cache/types.h"
 
@@ -282,8 +283,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     };
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
-    bool is_synced = (Settings::IsGPUFenceBehaviorDefault() ? !Settings::IsGPULevelHigh() : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate()) && is_fence;
-    std::function<void()> operation([this, is_synced, streamer, query_base = query, query_location,
+    std::function<void()> operation([this, streamer, query_base = query, query_location,
                                      pointer, pointer_timestamp, cpu_addr, addr,
                                      asid = gpu_memory->GetID(), counter_type] {
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
@@ -294,9 +294,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                          trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
                          static_cast<u32>(query_base->flags));
             }
-            if (!is_synced) [[likely]] {
-                impl->pending_unregister.push_back(query_location);
-            }
+            impl->pending_unregister.push_back(query_location);
             return;
         }
         if (False(query_base->flags & QueryFlagBits::IsFinalValueSynced)) [[unlikely]] {
@@ -309,9 +307,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             }
             LOG_ERROR(HW_GPU,
                       "Query report value not synchronized. Consider increasing GPU accuracy.");
-            if (!is_synced) [[likely]] {
-                impl->pending_unregister.push_back(query_location);
-            }
+            impl->pending_unregister.push_back(query_location);
             return;
         }
         query_base->value += streamer->GetAmendValue();
@@ -324,6 +320,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             u32 value = static_cast<u32>(query_base->value);
             std::memcpy(pointer, &value, sizeof(value));
         }
+        query_base->flags |= QueryFlagBits::IsGuestSynced;
         Tegra::Nx2SemaphoreWaiters::Get().OnWrite(cpu_addr, static_cast<u32>(query_base->value));
         if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Write)) {
             const bool wide = True(query_base->flags & QueryFlagBits::HasTimestamp);
@@ -334,12 +331,10 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                      wide ? query_base->value : static_cast<u32>(query_base->value),
                      static_cast<u32>(query_base->flags));
         }
-        if (!is_synced) [[likely]] {
-            impl->pending_unregister.push_back(query_location);
-        }
+        impl->pending_unregister.push_back(query_location);
     });
     if (is_fence) {
-        impl->rasterizer.SignalFence(std::move(operation));
+        SignalQueryReportFence(impl->rasterizer, std::move(operation));
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
             if (has_timestamp) {
@@ -363,10 +358,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             return;
         }
         impl->rasterizer.SyncOperation(std::move(operation));
-    }
-    if (is_synced) {
-        streamer->Free(new_query_id);
-        return;
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);
     {
@@ -620,8 +611,7 @@ bool QueryCacheBase<Traits>::IsQueryDirty(QueryCacheBase<Traits>::QueryLocation 
     if (!query_base) {
         return false;
     }
-    return True(query_base->flags & QueryFlagBits::IsHostManaged) &&
-           False(query_base->flags & QueryFlagBits::IsGuestSynced);
+    return QueryHasPendingGuestWrite(query_base->flags);
 }
 
 template <typename Traits>
@@ -630,8 +620,8 @@ bool QueryCacheBase<Traits>::SemiFlushQueryDirty(QueryCacheBase<Traits>::QueryLo
     if (!query_base) {
         return false;
     }
-    if (True(query_base->flags & QueryFlagBits::IsFinalValueSynced) &&
-        False(query_base->flags & QueryFlagBits::IsGuestSynced)) {
+    const auto publication = GetQueryPublicationDecision(query_base->flags);
+    if (publication.copy_value) {
         auto* ptr = impl->device_memory.template GetPointer<u8>(query_base->guest_address);
         if (True(query_base->flags & QueryFlagBits::HasTimestamp)) {
             std::memcpy(ptr, &query_base->value, sizeof(query_base->value));
@@ -651,8 +641,7 @@ bool QueryCacheBase<Traits>::SemiFlushQueryDirty(QueryCacheBase<Traits>::QueryLo
         }
         return false;
     }
-    return True(query_base->flags & QueryFlagBits::IsHostManaged) &&
-           False(query_base->flags & QueryFlagBits::IsGuestSynced);
+    return publication.wait;
 }
 
 template <typename Traits>

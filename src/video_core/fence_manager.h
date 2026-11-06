@@ -26,6 +26,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/query_cache/query_report_fence.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -81,7 +82,11 @@ public:
 
     void SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
-        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        const auto policy = GetFenceSignalPolicy(
+            Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh()
+                                                  : Settings::IsGPUFenceBehaviorBalanced() ||
+                                                        Settings::IsGPUFenceBehaviorAccurate());
+        const bool delay_fence = policy.delay_operation;
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
@@ -94,6 +99,7 @@ public:
         }
         skipped_fences = 0;
         should_flush |= query_cache.HasUncommittedFlushes();
+        should_flush |= policy.force_flush;
         query_cache.CommitAsyncFlushes();
         TFence new_fence = CreateFence(!should_flush);
         if constexpr (can_async_check) {
@@ -200,12 +206,11 @@ private:
     void TryReleasePendingFences() {
         while (!fences.empty()) {
             TFence& current_fence = fences.front();
-            if (ShouldWait() && !IsFenceSignaled(current_fence)) {
-                if constexpr (force_wait) {
-                    WaitFence(current_fence);
-                } else {
-                    return;
-                }
+            if (!PrepareFenceRelease<force_wait>(
+                    current_fence->IsStubbed(), ShouldWait(),
+                    [&] { return IsFenceSignaled(current_fence); },
+                    [&] { WaitFence(current_fence); })) {
+                return;
             }
             PopAsyncFlushes(pending_flushes.front());
             pending_flushes.pop_front();
