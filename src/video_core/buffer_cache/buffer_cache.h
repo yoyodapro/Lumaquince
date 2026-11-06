@@ -2897,11 +2897,21 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
             ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
                        cbuf_index);
+            if (table_pointer && !is_written &&
+                *device_addr - *aligned_device_addr != gpu_addr - aligned_gpu_addr) {
+                // A large host alignment can reach into a separately mapped preceding page.
+                // That prefix cannot represent this pointer as one contiguous host binding.
+                return NumericStorageBinding{};
+            }
             // The end address used for size calculation does not need to be aligned
             const DAddr cpu_end = Common::AlignUp(*device_addr + size, Core::DEVICE_PAGESIZE);
 
             const u64 binding_size = is_written ? aligned_size : cpu_end - *aligned_device_addr;
             if (binding_size > (std::numeric_limits<u32>::max)()) {
+                return NumericStorageBinding{};
+            }
+            if (table_pointer && !is_written &&
+                binding_size > runtime.GetMaxStorageBufferRange()) {
                 return NumericStorageBinding{};
             }
             const NumericStorageBinding binding{

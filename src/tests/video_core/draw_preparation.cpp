@@ -1324,3 +1324,17 @@ TEST_CASE("Read-only table bindings including alignment padding fit actual host 
         }
     }
 }
+
+TEST_CASE("Table pool alignment refuses a discontiguous physical prefix",
+          "[video_core][draw_preparation][storage_range]") {
+    Fixture f;
+    f.runtime.alignment = 65536;
+    constexpr GPUVAddr base = 0x40000000;
+    f.memory->Map(base, 0x10000000, 0x1000, Tegra::PTEKind::PITCH, false);
+    f.memory->Map(base + 0x1000, 0x20000000, 0xf000, Tegra::PTEKind::PITCH, false);
+    f.Descriptor(base + 0x1004, 0);
+    CHECK(f.Bind(false, false, true).size == 0);
+    // Repairing the prefix makes the same shader pointer representable again.
+    f.memory->Map(base + 0x1000, 0x10001000, 0xf000, Tegra::PTEKind::PITCH, false);
+    CHECK(f.Bind(false, false, true).size == 65536);
+}
