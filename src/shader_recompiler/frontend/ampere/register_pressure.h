@@ -170,6 +170,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0xa10:
     case 0xc10:
     case 0x812:
+    case 0xa12: // LOP3.LUT, constant buffer and uniform B: no register in B's field
+    case 0xc12:
     case 0x824:
     case 0x823:
     case 0x831:
