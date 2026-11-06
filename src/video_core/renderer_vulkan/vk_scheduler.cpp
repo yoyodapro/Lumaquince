@@ -318,8 +318,9 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     for (u32 i = 0; i < clear_value_count && i < values.size(); ++i) {
         values[i] = clear_values[i];
     }
-    Record([renderpass, framebuffer_handle, render_area, values, clear_value_count](
-               vk::CommandBuffer cmdbuf) {
+    const bool after_compute = compute_write_barrier.TakeForRenderPass();
+    Record([renderpass, framebuffer_handle, render_area, values, clear_value_count,
+            after_compute](vk::CommandBuffer cmdbuf) {
         const VkRenderPassBeginInfo renderpass_bi{
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = nullptr,
@@ -333,6 +334,11 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
             .clearValueCount = clear_value_count,
             .pClearValues = clear_value_count != 0 ? values.data() : nullptr,
         };
+        if (after_compute) {
+            // Draws read compute output as indirect arguments, vertices and resources; nothing
+            // else orders those reads after the dispatch.
+            RecordComputeToGraphicsBarrier(cmdbuf);
+        }
         cmdbuf.BeginRenderPass(renderpass_bi, VK_SUBPASS_CONTENTS_INLINE);
     });
     num_renderpass_images = framebuffer->NumImages();

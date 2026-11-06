@@ -219,7 +219,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
                      gpu.ShaderNotify()),
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
-      frame_dump(device, memory_allocator, scheduler), wfi_event(device.GetLogical().CreateEvent()) {
+      frame_dump(device, memory_allocator, scheduler) {
     scheduler.SetQueryCache(query_cache);
     VideoCommon::GpuSplit::Get().SetIdleHook(
         [](void* argument) { static_cast<Scheduler*>(argument)->FlushDeferred(); },
@@ -1337,6 +1337,10 @@ void RasterizerVulkan::DispatchCompute() {
 
     const auto& qmd{kepler_compute->launch_description};
     auto indirect_address = kepler_compute->GetIndirectComputeAddress();
+    const auto record_read_barrier = [this] {
+        scheduler.Record([](vk::CommandBuffer cmdbuf) { RecordComputeReadBarrier(cmdbuf); });
+        scheduler.NoteComputeWrites();
+    };
     if (indirect_address) {
         // DispatchIndirect
         static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
@@ -1344,6 +1348,7 @@ void RasterizerVulkan::DispatchCompute() {
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
         scheduler.RequestOutsideRenderPassOperationContext();
+        record_read_barrier();
         scheduler.TraceComputePipeline(pipeline->ShaderHash());
         scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),
                           indirect_offset = offset](vk::CommandBuffer cmdbuf) {
@@ -1363,14 +1368,7 @@ void RasterizerVulkan::DispatchCompute() {
         return;
     }
     scheduler.RequestOutsideRenderPassOperationContext();
-    static constexpr VkMemoryBarrier READ_BARRIER{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        .pNext = nullptr,
-        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-    };
-    scheduler.Record([](vk::CommandBuffer cmdbuf) { cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                               0, READ_BARRIER); });
+    record_read_barrier();
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
     scheduler.Record([this, pipeline, dim, byte_addressed_shadow](vk::CommandBuffer cmdbuf) {
         if (!pipeline->IsBound()) {
@@ -1701,9 +1699,8 @@ void RasterizerVulkan::WaitForIdle() {
         return;
     }
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
-        cmdbuf.SetEvent(event, flags);
-        cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
+    scheduler.Record([flags](vk::CommandBuffer cmdbuf) {
+        RecordWaitForIdleBarrier(cmdbuf, flags);
     });
     fence_manager.SignalOrdering();
 }
