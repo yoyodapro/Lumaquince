@@ -102,3 +102,24 @@ TEST_CASE("Unlimited and empty preload budgets still deduplicate exact keys", "[
     VideoCommon::PipelinePreloadQueue<Key, CollidingHash> next;
     CHECK(next.TryQueue(first));
 }
+
+TEST_CASE("Warm pipeline residency follows the driver budget rather than age alone",
+          "[pipeline_preload][pipeline_residency]") {
+    constexpr u64 MiB = 1024 * 1024;
+    constexpr u64 GiB = 1024 * MiB;
+    // Revisiting an area with an ample heap must not throw away its precompiled pipelines.
+    CHECK(VideoCommon::CanRetainUnusedPipelines(7 * GiB, 24 * GiB, GiB));
+    // Allocator blocks with no live allocations still consume the driver's budget.
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(7 * GiB, 8 * GiB, GiB));
+    CHECK(VideoCommon::CanRetainUnusedPipelines(7 * GiB, 8 * GiB, 511 * MiB));
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(7 * GiB, 8 * GiB, 512 * MiB));
+    // Small heaps reserve a proportional amount; unknown budgets use age-based eviction.
+    CHECK(VideoCommon::CanRetainUnusedPipelines(400 * MiB, 512 * MiB, 47 * MiB));
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(400 * MiB, 512 * MiB, 48 * MiB));
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(0, 0, 0));
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(9 * GiB, 8 * GiB, 0));
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(0, 8 * GiB,
+                                                    std::numeric_limits<u64>::max()));
+    CHECK_FALSE(VideoCommon::CanRetainUnusedPipelines(std::numeric_limits<u64>::max(),
+                                                    std::numeric_limits<u64>::max(), 0));
+}

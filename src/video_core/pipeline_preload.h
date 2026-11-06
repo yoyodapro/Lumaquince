@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <istream>
 #include <limits>
@@ -13,6 +14,23 @@
 namespace VideoCommon {
 
 inline constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
+
+// Keep already compiled pipelines resident while the driver reports room for them. Allocator
+// slack also occupies the heap, so reserve it before deciding whether a cache trim is needed.
+// Unknown budgets retain the conservative age-based policy. Subtraction avoids overflowing on
+// corrupt or transient driver values.
+inline bool CanRetainUnusedPipelines(u64 usage, u64 budget, u64 slack) {
+    constexpr u64 MaxReserve = 512ULL * 1024 * 1024;
+    if (budget == 0 || usage >= budget) {
+        return false;
+    }
+    const u64 available = budget - usage;
+    if (slack >= available) {
+        return false;
+    }
+    const u64 reserve = (std::min)(budget / 8, MaxReserve);
+    return available - slack > reserve;
+}
 
 // This optional index must never allocate from an unchecked file-supplied count. Reject an
 // incomplete index as a whole so startup falls back to the ordinary bounded preload policy.

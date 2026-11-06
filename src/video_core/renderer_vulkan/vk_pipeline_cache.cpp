@@ -1063,9 +1063,16 @@ void PipelineCache::EvictUnusedPipelines() {
     if (device.IsMoltenVK()) {
         return;
     }
-    // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
-    // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
+    // Age alone discarded warm pipelines even with plenty of free VRAM, undoing startup preload
+    // and causing shader translation again when returning to an area. Keep them until the
+    // driver's budget (including allocator slack) needs room. Without budget reporting, retain
+    // the conservative age-based trim.
+    if (device.CanReportMemoryUsage() &&
+        VideoCommon::CanRetainUnusedPipelines(device.GetDeviceMemoryUsage(),
+                                             device.GetDeviceMemoryBudget(),
+                                             device.GetDeviceMemorySlack())) {
+        return;
+    }
     constexpr u64 EvictAfterFrames = 9000;
     if (frame_count <= EvictAfterFrames) {
         return;
