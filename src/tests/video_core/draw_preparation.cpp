@@ -5,6 +5,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <vector>
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -676,9 +677,35 @@ TEST_CASE("Unaligned uniform streams reconcile GPU bytes without overwriting CPU
                     CHECK(f.bytes[0x10090] == 0x22);
                 }
             };
+            const auto describe_mismatch = [&] {
+                std::ostringstream message;
+                const auto bound = f.runtime.uniform_bindings.back().bytes;
+                const auto* current_device = f.device.GetPointer<u8>(0x20010);
+                std::array<u8, 256> cached_read{};
+                f.device.ReadBlockUnsafe(0x20010, cached_read.data(), cached_read.size());
+                message << "bound_size=" << bound.size() << " expected_size=" << expected.size()
+                        << " device_pointer_matches_cpu="
+                        << (current_device == f.bytes + 0x10010);
+                size_t mismatches = 0;
+                for (size_t index = 0; index < (std::min)(bound.size(), expected.size()); ++index) {
+                    if (bound[index] == expected[index]) {
+                        continue;
+                    }
+                    if (mismatches++ < 8) {
+                        message << " [index=" << index << " bound=" << u32{bound[index]}
+                                << " expected=" << u32{expected[index]}
+                                << " cpu=" << u32{f.bytes[0x10010 + index]}
+                                << " device=" << (current_device ? int{current_device[index]} : -1)
+                                << " cached=" << u32{cached_read[index]} << ']';
+                    }
+                }
+                message << " mismatches=" << mismatches;
+                return message.str();
+            };
 
             f.Bind(compute, id, 0x20010, 256);
             REQUIRE(f.runtime.uniform_bindings.size() == 1);
+            INFO("first bind: " << describe_mismatch());
             CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
             CHECK(f.runtime.uniform_bindings.back().streamed);
             CHECK(f.runtime.download_bytes == 16);
@@ -691,6 +718,7 @@ TEST_CASE("Unaligned uniform streams reconcile GPU bytes without overwriting CPU
             f.runtime.before_completion = {};
             f.Bind(compute, id, 0x20010, 256);
             REQUIRE(f.runtime.uniform_bindings.size() == 2);
+            INFO("repeated bind: " << describe_mismatch());
             CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
             CHECK(f.runtime.download_bytes == 16);
             CHECK(f.runtime.finishes == 1);
@@ -700,6 +728,7 @@ TEST_CASE("Unaligned uniform streams reconcile GPU bytes without overwriting CPU
             Access::Dirty(*f.cache, 0x20050, 16);
             std::fill_n(expected.begin() + 0x40, 16, 0xd3);
             f.Bind(compute, id, 0x20010, 256);
+            INFO("new GPU write: " << describe_mismatch());
             CHECK(std::ranges::equal(f.runtime.uniform_bindings.back().bytes, expected));
             CHECK(f.runtime.download_bytes == 32);
             CHECK(f.runtime.finishes == 2);
