@@ -74,7 +74,9 @@ private:
     std::span<const u64> code;
 };
 
-u32 EvaluateShift(IR::Value value) {
+using NumericCbuf = std::array<u32, 3>; // Bank, byte offset, value.
+
+u32 EvaluateShift(IR::Value value, std::optional<NumericCbuf> cbuf = std::nullopt) {
     value = value.Resolve();
     if (value.IsImmediate()) {
         if (value.Type() == IR::Type::F32) {
@@ -83,7 +85,7 @@ u32 EvaluateShift(IR::Value value) {
         return value.Type() == IR::Type::U1 ? u32{value.U1()} : value.U32();
     }
     const auto& inst = *value.Inst();
-    const auto arg = [&](size_t index) { return EvaluateShift(inst.Arg(index)); };
+    const auto arg = [&](size_t index) { return EvaluateShift(inst.Arg(index), cbuf); };
     switch (inst.GetOpcode()) {
     case IR::Opcode::Identity:
         return arg(0);
@@ -98,6 +100,13 @@ u32 EvaluateShift(IR::Value value) {
         return arg(0) & arg(1);
     case IR::Opcode::BitwiseOr32:
         return arg(0) | arg(1);
+    case IR::Opcode::BitwiseXor32:
+        return arg(0) ^ arg(1);
+    case IR::Opcode::GetCbufU32:
+        REQUIRE(cbuf.has_value());
+        CHECK(arg(0) == (*cbuf)[0]);
+        CHECK(arg(1) == (*cbuf)[1]);
+        return (*cbuf)[2];
     case IR::Opcode::IAdd32:
         return arg(0) + arg(1);
     case IR::Opcode::INeg32:
@@ -128,7 +137,8 @@ u32 EvaluateShift(IR::Value value) {
     }
 }
 
-void TranslateAndEmit(std::span<const u64> code, std::optional<u32> expected = std::nullopt) {
+void TranslateAndEmit(std::span<const u64> code, std::optional<u32> expected = std::nullopt,
+                      std::optional<NumericCbuf> cbuf = std::nullopt) {
     LoggedEnvironment env{code};
     Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
     Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{0x50}};
@@ -144,7 +154,7 @@ void TranslateAndEmit(std::span<const u64> code, std::optional<u32> expected = s
             ++stores;
             if (expected) {
                 INFO(IR::DumpProgram(program));
-                CHECK(EvaluateShift(inst.Arg(1)) == *expected);
+                CHECK(EvaluateShift(inst.Arg(1), cbuf) == *expected);
             }
         }
     }
@@ -537,4 +547,102 @@ TEST_CASE("Logged Ocarina shadowed integer arithmetic retains numeric results",
             finish(std::move(code), instruction, lowered, expected);
         }
     }
+}
+
+TEST_CASE("Native LOP3 non-register B forms preserve shadowed operands and values",
+          "[video_core][ampere][logged_numeric][lop3_pressure]") {
+    // Synthetic instructions: XOR all three inputs, with each GPR operand independently high,
+    // then all high and aliased. B is respectively a constant buffer, UR23, or an immediate.
+    constexpr Instruction uniform_marker{{0x0000fc02, 0, 0, 0}};
+    constexpr u32 value_a = 0x13579bdf, value_b = 0xdeadbeef, value_c = 0x2468ace0;
+    constexpr u32 old_destination = 0x76543210;
+    constexpr u32 cbuf_bank = 3, cbuf_offset = 0x3c0;
+    const auto initialize = [](std::vector<u64>& code, u32 reg, u32 value,
+                               bool uniform = false) {
+        code.push_back(0x0100000000070000ULL | (15ULL << 12) | (u64{value} << 20));
+        code.push_back(Shader::Ampere::NativeRegisterCopy(!uniform && reg >= 216 ? 1 : 0,
+                                                       reg, 0, 0));
+    };
+    constexpr std::array<std::array<u32, 3>, 6> operands{{
+        {220, 21, 22}, {20, 224, 22}, {20, 21, 228},
+        {220, 224, 228}, {224, 224, 228}, {228, 224, 228},
+    }};
+    for (const u32 opcode : {0xa12U, 0xc12U, 0x812U}) {
+        const u32 source_b = opcode == 0xa12 ? (cbuf_bank << 22) | (cbuf_offset << 6)
+                             : opcode == 0xc12 ? 23U : value_b;
+        for (const auto& regs : operands) {
+            const auto [destination, a, c] = regs;
+            for (const bool enabled : {true, false}) {
+                const u32 guard = enabled ? 7U : 15U; // PT and !PT.
+                const Instruction instruction{{opcode | (guard << 12) | (destination << 16) |
+                                                   (a << 24),
+                                               source_b, 0x0f8e9600U | c, 0}};
+                CAPTURE(opcode, destination, a, c, enabled);
+                const auto lowered = LowerToMaxwell(std::array{uniform_marker, instruction, Exit});
+                INFO(lowered.error);
+                REQUIRE(lowered);
+                if (enabled) {
+                    const auto pressure = Shader::Ampere::PrepareRegisterPressure(instruction, 216);
+                    REQUIRE(pressure.valid);
+                    // B is not a GPR, including the immediate's high-looking low byte.
+                    CHECK(pressure.instruction.words[1] == source_b);
+                    CHECK(pressure.instruction.Bits(72, 8) == 0x96);
+                    CHECK(pressure.instruction.Bits(12, 4) == guard);
+                }
+                std::vector<u64> code;
+                initialize(code, destination, old_destination);
+                initialize(code, a, value_a);
+                initialize(code, c, value_c);
+                initialize(code, 241, value_b, true); // UR23's physical mirror, not guest R241.
+                // Sentinels distinguish restored low quartets and guest shadows from UR mirrors.
+                initialize(code, 208, 0xa5a5a5a5);
+                initialize(code, 212, 0x5a5a5a5a);
+                code.insert(code.end(), lowered.instructions.begin(), lowered.instructions.end() - 1);
+                code.push_back(Shader::Ampere::NativeRegisterCopy(0, 0,
+                                                               destination >= 216 ? 1 : 0,
+                                                               destination));
+                code.push_back(Store(0));
+                code.push_back(lowered.instructions.back());
+                const u32 unchanged = destination == a ? value_a
+                                      : destination == c ? value_c : old_destination;
+                TranslateAndEmit(code, enabled ? value_a ^ value_b ^ value_c : unchanged,
+                                 opcode == 0xa12
+                                     ? std::optional{NumericCbuf{cbuf_bank, cbuf_offset, value_b}}
+                                     : std::nullopt);
+                // The borrowed low registers and uniform mirror must survive the instruction.
+                for (const auto [reg, expected] :
+                     std::array<std::array<u32, 2>, 3>{{{208, 0xa5a5a5a5},
+                                                       {212, 0x5a5a5a5a}, {241, value_b}}}) {
+                    code[code.size() - 3] = Shader::Ampere::NativeRegisterCopy(0, 0, 0, reg);
+                    TranslateAndEmit(code, expected);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Native LOP3 uniform B uses high-bank mirrors without rewriting its selector",
+          "[video_core][ampere][logged_numeric][lop3_pressure]") {
+    // The high uniform bank reserves R192 upwards, so R194 must be shadowed even though it
+    // lies below the ordinary R216 boundary. This does not require a captured game program.
+    const Instruction instruction{{0xc2157c12, 23, 0x0f8ec0ff, 0}};
+    const auto lowered = Shader::Ampere::LowerToMaxwellWith(std::array{instruction, Exit}, 24);
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    const auto pressure = Shader::Ampere::PrepareRegisterPressure(instruction, 192);
+    REQUIRE(pressure.valid);
+    CHECK(pressure.instruction.Bits(32, 8) == 23);
+    CHECK(pressure.instruction.Bits(24, 8) < 192);
+    CHECK(pressure.instruction.Bits(16, 8) == 21);
+    CHECK(pressure.instruction.Bits(64, 8) == 255);
+    std::vector<u64> code;
+    for (const auto [bank, reg, value] :
+         std::array<std::array<u32, 3>, 2>{{{1, 194, 0x13579bdf}, {0, 241, 0xdeadbeef}}}) {
+        code.push_back(0x0100000000070000ULL | (15ULL << 12) | (u64{value} << 20));
+        code.push_back(Shader::Ampere::NativeRegisterCopy(bank, reg, 0, 0));
+    }
+    code.insert(code.end(), lowered.instructions.begin(), lowered.instructions.end() - 1);
+    code.push_back(Store(21));
+    code.push_back(lowered.instructions.back());
+    TranslateAndEmit(code, 0x13579bdfU & 0xdeadbeefU);
 }
