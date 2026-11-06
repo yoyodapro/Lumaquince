@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <type_traits>
 #include <utility>
 
 #include "common/assert.h"
@@ -1239,6 +1240,17 @@ void FileEnvironment::Deserialize(std::istream& input) {
     }
     is_proprietary_driver = (flags & 1) != 0;
     has_hle_engine_state = (flags & 2) != 0;
+}
+
+size_t FileEnvironment::MemorySize() const {
+    const auto map_bytes = [](const auto& map) {
+        return (map.bucket_count() + 1) *
+               (sizeof(typename std::decay_t<decltype(map)>::value_type) + 2);
+    };
+    return sizeof(*this) + code.capacity() * sizeof(u64) + map_bytes(texture_types) +
+           map_bytes(texture_pixel_formats) + map_bytes(cbuf_values) +
+           map_bytes(storage_pointer_types) + map_bytes(cbuf_replacements) +
+           map_bytes(cbuf_word_cache) + map_bytes(handle_cache) + map_bytes(track_cache);
 }
 
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {

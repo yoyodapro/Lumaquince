@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -15,6 +16,7 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
 #include "video_core/shader_environment.h"
 
 namespace {
@@ -238,6 +240,23 @@ TEST_CASE("Shader environment rejects incomplete and corrupt records before tran
         CHECK_FALSE(source.CanBeSerialized());
         CHECK_THROWS_AS(Serialize(source), std::ios_base::failure);
     }
+}
+
+TEST_CASE("Cached environment storage participates in the prebuild capture budget",
+          "[shader_environment][pipeline_prebuild]") {
+    CapturedEnvironment source(Shader::Stage::VertexB);
+    VideoCommon::FileEnvironment restored;
+    const auto empty_bytes = restored.MemorySize();
+    Deserialize(Serialize(source), restored);
+    const auto capture_bytes = restored.MemorySize();
+    REQUIRE(capture_bytes > empty_bytes);
+    Vulkan::PipelinePrebuild<int, int> too_small{1, capture_bytes - 1, false};
+    REQUIRE_FALSE(too_small.Add(1, capture_bytes, [] { return std::make_unique<int>(42); }));
+    Vulkan::PipelinePrebuild<int, int> exact{1, capture_bytes, false};
+    REQUIRE(exact.Add(1, capture_bytes, [env = std::move(restored)]() mutable {
+        return std::make_unique<int>(env.ReadCbufValue(1, 16) == 0xabcdef01 ? 42 : 0);
+    }));
+    exact.Stop();
 }
 
 TEST_CASE("Task and mesh translation and SPIRV are identical after cache reload",

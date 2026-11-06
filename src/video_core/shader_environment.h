@@ -227,6 +227,9 @@ public:
 
     void Deserialize(std::istream& file);
 
+    /// Conservative retained-input estimate used by bounded cached-pipeline prebuilds.
+    [[nodiscard]] size_t MemorySize() const;
+
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 
     [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;

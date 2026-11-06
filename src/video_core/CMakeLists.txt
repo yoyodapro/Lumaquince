@@ -121,6 +121,7 @@ add_library(video_core STATIC
     nx2_debug_control.cpp
     nx2_debug_control.h
     nx2_profile.h
+    nx2_perf.h
     pending_maps.h
     present.h
     pte_kind.h
@@ -173,6 +174,9 @@ add_library(video_core STATIC
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
     renderer_vulkan/pipeline_helper.h
+    renderer_vulkan/pipeline_build.h
+    renderer_vulkan/pipeline_shader_emission.h
+    renderer_vulkan/vk_pipeline_cache_prebuild.h
     renderer_vulkan/index_binding_state.h
     renderer_vulkan/input_assembly_state.h
     renderer_vulkan/frame_dump_draw_metadata.h
