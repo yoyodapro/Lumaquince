@@ -122,6 +122,12 @@ public:
     virtual void NoteGpuWrittenCommandListSynced([[maybe_unused]] DAddr page) {}
 
     /// Check if the the specified memory area requires flushing to CPU Memory.
+    /// Reconcile buffer-produced words before the CPU decodes resource bindings. Implementations
+    /// must preserve newer CPU bytes sharing a page with the pending GPU result.
+    virtual void PrepareResourceRead(DAddr addr, u64 size) {
+        FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
+    }
+
     virtual bool MustFlushRegion(DAddr addr, u64 size,
                                  VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
 

@@ -19,7 +19,7 @@ struct DescriptorMemory {
     std::array<u32, 2> reads{};
 
     template <typename T>
-    T Read(u64 address) {
+    T ReadResource(u64 address) {
         const size_t word = (address & 15) / 8;
         ++reads[word];
         return static_cast<T>(descriptor[word]);

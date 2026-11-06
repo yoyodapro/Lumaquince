@@ -76,6 +76,17 @@ public:
     template <typename T>
     [[nodiscard]] T Read(GPUVAddr addr) const;
 
+    /// CPU decoding of GPU-produced resource state. May submit/wait: use during preparation,
+    /// before binding geometry or acquiring a draw/dispatch descriptor payload.
+    template <typename T>
+    [[nodiscard]] T ReadResource(GPUVAddr addr) const {
+        T value{};
+        ReadResourceBlock(addr, &value, sizeof(value));
+        return value;
+    }
+
+    void ReadResourceBlock(GPUVAddr addr, void* destination, std::size_t size) const;
+
     template <typename T>
     void Write(GPUVAddr addr, T data);
 

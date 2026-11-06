@@ -41,6 +41,7 @@
 #include "video_core/surface.h"
 #include "video_core/texture_cache/clear_plan.h"
 #include "video_core/texture_cache/descriptor_table.h"
+#include "video_core/texture_cache/feedback_loop.h"
 #include "video_core/texture_cache/image_base.h"
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
@@ -541,11 +542,7 @@ private:
     u32 rt_active_mask = 0;
     std::array<ImageId, 8> rt_image_id{};
     ImageId rt_depth_image_id{};
-    u64 texture_bindings_serial = 0;
-    u64 last_feedback_loop_serial = 0;
-    u64 last_feedback_texture_serial = 0;
-    bool last_feedback_loop_result = false;
-    bool feedback_depth_dirty = true;
+    FeedbackLoopState feedback_loop;
     FramebufferId last_framebuffer_id{};
     u64 last_framebuffer_serial = 0;
 

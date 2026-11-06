@@ -149,6 +149,7 @@ add_executable(tests
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
     video_core/descriptor_table_capacity.cpp
+    video_core/feedback_loop.cpp
     video_core/query_copy_batches.cpp
     video_core/query_bank.cpp
     video_core/query_publication.cpp

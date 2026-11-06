@@ -14,7 +14,7 @@ struct AddressMemory {
         return nullptr;
     }
 
-    void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+    void ReadResourceBlock(GPUVAddr address, void* output, size_t size) const {
         std::memcpy(output, &address, size);
     }
 };

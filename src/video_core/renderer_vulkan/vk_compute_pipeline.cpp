@@ -341,7 +341,6 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                                 TextureCacheRuntime& texture_runtime,
                                 std::optional<ByteAddressedShadow>& shadow) {
     shadow.reset();
-    guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
     buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
     buffer_cache.UnbindComputeStorageBuffers();
@@ -386,12 +385,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                 const u32 secondary_offset{desc.secondary_cbuf_offset};
                 const GPUVAddr separate_addr{cbufs[desc.secondary_cbuf_index].Address() +
                                              secondary_offset};
-                const u32 lhs_raw{gpu_memory.Read<u32>(addr) << desc.shift_left};
-                const u32 rhs_raw{gpu_memory.Read<u32>(separate_addr) << desc.secondary_shift_left};
+                const u32 lhs_raw{gpu_memory.ReadResource<u32>(addr) << desc.shift_left};
+                const u32 rhs_raw{gpu_memory.ReadResource<u32>(separate_addr) << desc.secondary_shift_left};
                 return TexturePair(lhs_raw | rhs_raw, via_header_index);
             }
         }
-        return TexturePair(gpu_memory.Read<u32>(addr), via_header_index);
+        return TexturePair(gpu_memory.ReadResource<u32>(addr), via_header_index);
     }};
     const auto add_image{[&](const auto& desc, bool blacklist) {
         for (u32 index = 0; index < desc.count; ++index) {
@@ -544,6 +543,8 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     std::ranges::for_each(info.image_buffer_descriptors, add_buffer);
 
     buffer_cache.UpdateComputeBuffers();
+    // Resource and unaligned-uniform readbacks may submit. Acquire only after preparation.
+    guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
     buffer_cache.BindHostComputeBuffers();
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();

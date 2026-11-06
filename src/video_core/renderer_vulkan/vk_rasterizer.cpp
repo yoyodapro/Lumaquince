@@ -1476,6 +1476,12 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
     }
 }
 
+void RasterizerVulkan::PrepareResourceRead(DAddr addr, u64 size) {
+    gpu.InvalidateGPUCache();
+    std::scoped_lock lock{buffer_cache.mutex};
+    buffer_cache.PrepareResourceRead(addr, size);
+}
+
 bool RasterizerVulkan::MustFlushRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};

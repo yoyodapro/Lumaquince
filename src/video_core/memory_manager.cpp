@@ -480,6 +480,35 @@ void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::siz
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false);
 }
 
+void MemoryManager::ReadResourceBlock(GPUVAddr addr, void* destination, std::size_t size) const {
+    if (size == 0) {
+        return;
+    }
+    if (!IsWithinGPUAddressRange(addr) || size > address_space_size - addr) {
+        std::memset(destination, 0, size);
+        return;
+    }
+    // Ordinary CPU-owned descriptors need neither a submission nor cache invalidation. Keep
+    // this independent of accuracy settings: the producer and consumer are both guest GPU work.
+    if (IsMemoryDirty(addr, size, VideoCommon::CacheType::BufferCache)) {
+        const auto unmapped = [](std::size_t, std::size_t, std::size_t) {};
+        const auto normal = [&](std::size_t page, std::size_t offset, std::size_t amount) {
+            rasterizer->PrepareResourceRead((DAddr(page_table[page]) << cpu_page_bits) + offset,
+                                            amount);
+        };
+        const auto big = [&](std::size_t page, std::size_t offset, std::size_t amount) {
+            rasterizer->PrepareResourceRead(
+                (DAddr(big_page_table_dev[page]) << cpu_page_bits) + offset, amount);
+        };
+        const auto small_pages = [&](std::size_t page, std::size_t offset, std::size_t amount) {
+            MemoryOperation((GPUVAddr{page} << big_page_bits) + offset, amount, false, normal,
+                            unmapped, unmapped);
+        };
+        MemoryOperation(addr, size, true, big, unmapped, small_pages);
+    }
+    ReadBlockUnsafe(addr, destination, size);
+}
+
 void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, const std::size_t size) const {
     // Small reads within one 4 KiB page (texture and sampler descriptors, several per draw): one
     // translation and a copy, as Read<T> does, instead of the page walk (~3% of the GPU thread

@@ -53,11 +53,11 @@ public:
     NumericStorageBinding Get(Memory& memory, GPUVAddr descriptor, u32 alignment,
                               StorageBindingPolicy policy, Resolve&& resolve) {
         // Guest pointer/size words can change without a mapping change. Read them on every bind.
-        const GPUVAddr gpu_addr = memory.template Read<u64>(descriptor);
+        const GPUVAddr gpu_addr = memory.template ReadResource<u64>(descriptor);
         if (gpu_addr == 0) {
             return {};
         }
-        const u64 next_qword = policy.ReadsSizeWord() ? memory.template Read<u64>(descriptor + 8) : 0;
+        const u64 next_qword = policy.ReadsSizeWord() ? memory.template ReadResource<u64>(descriptor + 8) : 0;
         const Key key{memory.GetID(), memory.MapSerial(), gpu_addr, next_qword, alignment,
                       policy.Flags()};
         auto& set = entries[((gpu_addr ^ next_qword ^ key.flags) * 0x9E3779B97F4A7C15ULL) >> 55];

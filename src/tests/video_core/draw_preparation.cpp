@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -22,6 +23,8 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_null/null_rasterizer.h"
+#include "video_core/shader_handle_program.h"
+#include "video_core/texture_cache/descriptor_table.h"
 
 namespace {
 
@@ -323,6 +326,54 @@ struct BufferCacheTestAccess {
 namespace {
 
 using Access = VideoCommon::BufferCacheTestAccess;
+
+// Local adapter for the real MemoryManager -> BufferCache resource-read path. Other GPU
+// operations remain on Fixture's null rasterizer; these tests never create a graphics device.
+class ResourceReadRecorder final : public VideoCore::RasterizerInterface {
+public:
+    Cache* cache{};
+    u32 preparations{};
+    void Draw(bool, u32) override {}
+    void DrawTexture() override {}
+    void Clear(u32) override {}
+    void DispatchCompute() override {}
+    void ResetCounter(VideoCommon::QueryType) override {}
+    void Query(GPUVAddr, VideoCommon::QueryType, VideoCommon::QueryPropertiesFlags, u32, u32) override {}
+    void BindGraphicsUniformBuffer(size_t, u32, GPUVAddr, u32) override {}
+    void DisableGraphicsUniformBuffer(size_t, u32) override {}
+    void SignalFence(std::function<void()>&&) override {}
+    void SyncOperation(std::function<void()>&&) override {}
+    void SignalSyncPoint(u32) override {}
+    void SignalReference() override {}
+    void ReleaseFences(bool) override {}
+    void FlushAll() override {}
+    void FlushRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    bool MustFlushRegion(DAddr address, u64 size, VideoCommon::CacheType which) override {
+        REQUIRE(which == VideoCommon::CacheType::BufferCache);
+        return cache->IsRegionGpuModified(address, size);
+    }
+    void PrepareResourceRead(DAddr address, u64 size) override {
+        ++preparations;
+        cache->PrepareResourceRead(address, size);
+    }
+    void ModifyGPUMemory(size_t, GPUVAddr, u64) override {}
+    VideoCore::RasterizerDownloadArea GetFlushArea(DAddr, u64) override { return {}; }
+    void InvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void OnCacheInvalidation(PAddr, u64) override {}
+    bool OnCPUWrite(PAddr, u64) override { return false; }
+    void InvalidateGPUCache() override {}
+    void UnmapMemory(DAddr, u64) override {}
+    void FlushAndInvalidateRegion(DAddr, u64, VideoCommon::CacheType) override {}
+    void WaitForIdle() override {}
+    void FragmentBarrier() override {}
+    void TiledCacheBarrier() override {}
+    void FlushCommands() override {}
+    void TickFrame() override {}
+    Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override {
+        throw std::logic_error("Unexpected DMA in resource-read test");
+    }
+    void AccelerateInlineToMemory(GPUVAddr, size_t, std::span<const u8>) override {}
+};
 
 struct Fixture {
     ScopedSystemTestContext context;
@@ -1083,5 +1134,139 @@ TEST_CASE("Device block-read translations do not survive manager lifetime reuse"
         manager->Unmap(0x60000, 0x2000);
         manager->UnregisterProcess(process_id);
         manager.reset();
+    }
+}
+
+TEST_CASE("GPU resource words are coherent before storage and texture binding decisions",
+          "[video_core][draw_preparation][resource_coherency]") {
+    for (const bool mapped : {false, true}) {
+        CAPTURE(mapped);
+        ResourceReadRecorder recorder;
+        Fixture f;
+        recorder.cache = f.cache.get();
+        f.memory->BindRasterizer(&recorder);
+        f.memory->Map(0x200000, 0x20000, 0x10000, Tegra::PTEKind::PITCH, true);
+        f.memory->Map(0x300000, 0x30000, 0x10000, Tegra::PTEKind::PITCH, true);
+        f.Descriptor(0x200000, 0x1000);
+        REQUIRE(f.Bind().device_addr == 0x20000);
+        const auto id = Access::Add(*f.cache, 0x10000, 0x10000, mapped);
+        auto& host = Access::Get(*f.cache, id);
+        std::memcpy(host.bytes.data(), f.bytes, host.bytes.size());
+        const auto gpu_write = [&](u32 offset, auto value) {
+            std::memcpy(host.bytes.data() + offset, &value, sizeof(value));
+            Access::Dirty(*f.cache, 0x10000 + offset, sizeof(value));
+        };
+        f.runtime.before_completion = [&] {
+            CHECK(f.runtime.uniform_bindings.empty());
+        };
+
+        // The pointer changes without a map serial or CPU RAM update. Numeric-cache reuse must
+        // decode the producer's new pointer, including when a CPU write masks its dirty page.
+        gpu_write(0, u64{0x300000});
+        f.bytes[32] = 0x65;
+        Access::CpuDirty(*f.cache, 0x10020, 1);
+        REQUIRE(f.memory->Read<u64>(0x100000) == 0x200000);
+        REQUIRE(f.Bind().device_addr == 0x30000);
+        CHECK(f.bytes[32] == 0x65);
+        REQUIRE(recorder.preparations == 1);
+        const auto completions = f.runtime.finishes + f.runtime.waits;
+        REQUIRE(completions == 1);
+        CHECK(f.Bind().device_addr == 0x30000);
+        CHECK(recorder.preparations == 1);
+        CHECK(f.runtime.finishes + f.runtime.waits == completions);
+
+        // A descriptor table must invalidate the old view/sampler decision when its entry is
+        // GPU-written, even though its base, limit and index are unchanged.
+        VideoCommon::DescriptorTable<u64> table;
+        REQUIRE(table.Synchronize(0x100100, 0));
+        REQUIRE(table.Read(*f.memory, 0).first == 0);
+        table.bound_ids[0] = 7;
+        gpu_write(0x100, u64{0xabcdef});
+        const auto [descriptor, changed] = table.Read(*f.memory, 0);
+        CHECK(descriptor == 0xabcdef);
+        REQUIRE(changed);
+        CHECK_FALSE(table.Read(*f.memory, 0).second);
+
+        // The real runtime handle evaluator follows both GPU-written pointer levels and then
+        // reads the GPU-written handle, rather than following the old guest-memory chain.
+        Shader::Info info;
+        Shader::StorageBufferDescriptor storage{};
+        storage.cbuf_index = 0;
+        storage.cbuf_offset = 0x200;
+        storage.indirect_offset = 8;
+        info.storage_buffers_descriptors.push_back(storage);
+        info.handle_programs.push_back({static_cast<u32>(Shader::HandleOp::Immediate), 4,
+                                       static_cast<u32>(Shader::HandleOp::Storage), 0});
+        gpu_write(0x200, u64{0x100300});
+        gpu_write(0x308, u64{0x100400});
+        gpu_write(0x404, u32{0x123456});
+        CHECK(VideoCommon::EvaluateTextureHandle(info, 0, *f.memory,
+                                                 [](u32) { return GPUVAddr{0x100000}; }) ==
+              0x123456);
+        CHECK(f.runtime.uniform_bindings.empty());
+        const auto completed_reads = f.runtime.finishes + f.runtime.waits;
+        CHECK(VideoCommon::EvaluateTextureHandle(info, 0, *f.memory,
+                                                 [](u32) { return GPUVAddr{0x100000}; }) ==
+              0x123456);
+        CHECK(f.runtime.finishes + f.runtime.waits == completed_reads);
+    }
+}
+
+TEST_CASE("Resource words crossing discontiguous GPU pages reconcile each producer",
+          "[video_core][draw_preparation][resource_coherency]") {
+    ResourceReadRecorder recorder;
+    Fixture f;
+    recorder.cache = f.cache.get();
+    f.memory->BindRasterizer(&recorder);
+    f.memory->Map(0x400000, 0x10000, 0x1000, Tegra::PTEKind::PITCH, false);
+    f.memory->Map(0x401000, 0x30000, 0x1000, Tegra::PTEKind::PITCH, false);
+    const auto first = Access::Add(*f.cache, 0x10000, 0x1000);
+    const auto second = Access::Add(*f.cache, 0x30000, 0x1000);
+    const u32 low = 0x01234567;
+    const u32 high = 0x89abcdef;
+    std::memcpy(Access::Get(*f.cache, first).bytes.data() + 0xffc, &low, sizeof(low));
+    std::memcpy(Access::Get(*f.cache, second).bytes.data(), &high, sizeof(high));
+    Access::Dirty(*f.cache, 0x10ffc, sizeof(low));
+    Access::Dirty(*f.cache, 0x30000, sizeof(high));
+    CHECK(f.memory->ReadResource<u64>(0x400ffc) == 0x89abcdef01234567ULL);
+    CHECK(recorder.preparations == 2);
+    CHECK(f.runtime.download_bytes == sizeof(u64));
+    CHECK(f.runtime.finishes == 2);
+    CHECK(f.memory->ReadResource<u64>(0x400ffc) == 0x89abcdef01234567ULL);
+    CHECK(recorder.preparations == 2);
+    CHECK(f.memory->ReadResource<u32>(0x402000) == 0);
+    CHECK(recorder.preparations == 2);
+}
+
+TEST_CASE("Resource decoding finishes before graphics and compute uniform descriptors",
+          "[video_core][draw_preparation][resource_coherency]") {
+    for (const bool compute : {false, true}) {
+        CAPTURE(compute);
+        ResourceReadRecorder recorder;
+        UniformFixture f;
+        recorder.cache = f.cache.get();
+        f.memory->BindRasterizer(&recorder);
+        f.runtime.uniform_alignment = 256;
+        const auto id = Access::Add(*f.cache, 0x20000, 0x1000);
+        auto& host = Access::Get(*f.cache, id);
+        const u32 gpu_handle = 0x7465;
+        std::memcpy(host.bytes.data() + 0x20, &gpu_handle, sizeof(gpu_handle));
+        Access::Dirty(*f.cache, 0x20020, sizeof(gpu_handle));
+        bool binding_started{};
+        f.runtime.before_completion = [&] {
+            CHECK_FALSE(binding_started);
+            CHECK(f.runtime.uniform_bindings.empty());
+        };
+        REQUIRE(f.memory->Read<u32>(0x20020) == 0);
+        REQUIRE(f.memory->ReadResource<u32>(0x20020) == gpu_handle);
+        REQUIRE(f.runtime.finishes == 1);
+        binding_started = true;
+        f.Bind(compute, id, 0x20010, 256);
+        REQUIRE(f.runtime.uniform_bindings.size() == 1);
+        u32 bound_handle{};
+        std::memcpy(&bound_handle, f.runtime.uniform_bindings[0].bytes.data() + 0x10,
+                    sizeof(bound_handle));
+        CHECK(bound_handle == gpu_handle);
+        CHECK(f.runtime.finishes == 1);
     }
 }

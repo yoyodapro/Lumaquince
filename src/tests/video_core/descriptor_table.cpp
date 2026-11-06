@@ -16,13 +16,12 @@ namespace {
 struct DescriptorMemory {
     std::array<std::array<u64, 128>, 2> banks{};
 
-    // DescriptorTable::Read prefers a single-page host pointer when the memory manager offers one;
-    // these tests are about the invalidation bookkeeping on the generic read path.
+    // CPU-only backing for descriptor invalidation bookkeeping; no GPU producer to reconcile.
     const u8* GetPointer(GPUVAddr) const {
         return nullptr;
     }
 
-    void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+    void ReadResourceBlock(GPUVAddr address, void* output, size_t size) const {
         const auto bank = (address - 0x1000) / 0x1000;
         const auto offset = (address - 0x1000) % 0x1000;
         std::memcpy(output, reinterpret_cast<const u8*>(banks[bank].data()) + offset, size);
@@ -113,7 +112,7 @@ TEST_CASE("Descriptor limits clear exposed slots after shrink and growth", "[des
             return nullptr;
         }
 
-        void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+        void ReadResourceBlock(GPUVAddr address, void* output, size_t size) const {
             std::memcpy(output, &address, size);
         }
     } memory;
@@ -279,7 +278,7 @@ TEST_CASE("Bound descriptor IDs refresh after descriptor capacity changes", "[de
             return nullptr;
         }
 
-        void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+        void ReadResourceBlock(GPUVAddr address, void* output, size_t size) const {
             std::memcpy(output, &address, size);
         }
     } memory;
@@ -369,7 +368,7 @@ TEST_CASE("Descriptor ID lookup CPU benchmark", "[.][descriptor_lookup_bench]") 
             return reinterpret_cast<const u8*>(descriptors.data()) + address - 0x1000;
         }
 
-        void ReadBlockUnsafe(GPUVAddr address, void* output, size_t size) const {
+        void ReadResourceBlock(GPUVAddr address, void* output, size_t size) const {
             std::memcpy(output, GetPointer(address), size);
         }
     };

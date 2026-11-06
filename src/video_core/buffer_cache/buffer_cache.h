@@ -287,6 +287,21 @@ void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
 }
 
 template <class P>
+void BufferCache<P>::PrepareResourceRead(DAddr device_addr, u64 size) {
+    if (!IsRegionGpuModified(device_addr, size)) {
+        return;
+    }
+    ForEachBufferInRange(device_addr, size, [&](BufferId, Buffer& buffer) {
+        const DAddr begin = (std::max)(device_addr, buffer.CpuAddr());
+        const DAddr end = (std::min)(device_addr + size, buffer.CpuAddr() + buffer.SizeBytes());
+        // Like unaligned uniforms, first unmask CPU-dirty pages without replacing precise
+        // GPU-owned spans. Download only after that upload, before any descriptor is bound.
+        SynchronizeBuffer(buffer, begin, static_cast<u32>(end - begin));
+        DownloadBufferMemory(buffer, begin, end - begin);
+    });
+}
+
+template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     for (auto& ranges : pending_download_ranges) {
         ranges.Subtract(device_addr, size);
@@ -595,7 +610,7 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     GPUVAddr holder{};
     if (indirect_offset != ~0U) {
         // The pointer is an entry of a table the constant buffer points to.
-        holder = gpu_memory->Read<u64>(ssbo_addr);
+        holder = gpu_memory->ReadResource<u64>(ssbo_addr);
         if (holder == 0) {
             channel_state->storage_buffers[stage][ssbo_index] = NULL_BINDING;
             return false;
@@ -690,7 +705,7 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     GPUVAddr ssbo_addr = cbufs[cbuf_index].Address() + cbuf_offset;
     GPUVAddr holder{};
     if (indirect_offset != ~0U) {
-        holder = gpu_memory->Read<u64>(ssbo_addr);
+        holder = gpu_memory->ReadResource<u64>(ssbo_addr);
         if (holder == 0) {
             channel_state->compute_storage_buffers[ssbo_index] = NULL_BINDING;
             return;

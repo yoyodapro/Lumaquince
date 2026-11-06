@@ -539,39 +539,10 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     }
     const auto& regs = maxwell3d->regs;
     const bool writes_depth_stencil = regs.depth_write_enabled != 0 || regs.stencil_enable != 0;
-    const auto barrier = [&] {
-        if (feedback_depth_dirty) {
-            runtime.BarrierFeedbackLoop();
-            feedback_depth_dirty = false;
-        }
-    };
-    SCOPE_EXIT {
-        if (writes_depth_stencil) {
-            feedback_depth_dirty = true;
-        }
-    };
-
-    if (render_targets_serial == last_feedback_loop_serial &&
-        texture_bindings_serial == last_feedback_texture_serial) {
-        if (last_feedback_loop_result) {
-            barrier();
-        }
-        return;
-    }
-    if (render_targets_serial != last_feedback_loop_serial) {
-        feedback_depth_dirty = true;
-    }
-
-    if (rt_active_mask == 0) {
-        last_feedback_loop_serial = render_targets_serial;
-        last_feedback_texture_serial = texture_bindings_serial;
-        last_feedback_loop_result = false;
-        return;
-    }
     const u32 depth_bit = 1u << NUM_RT;
     const bool depth_active = (rt_active_mask & depth_bit) != 0;
 
-    const bool requires_barrier = [&] {
+    const auto requires_barrier = [&] {
         for (const auto& view : views) {
             if (!view.id) {
                 continue;
@@ -602,13 +573,10 @@ void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
         }
 
         return false;
-    }();
-
-    last_feedback_loop_serial = render_targets_serial;
-    last_feedback_texture_serial = texture_bindings_serial;
-    last_feedback_loop_result = requires_barrier;
-    if (requires_barrier) {
-        barrier();
+    };
+    if (feedback_loop.NeedsBarrier(render_targets_serial, writes_depth_stencil,
+                                   requires_barrier)) {
+        runtime.BarrierFeedbackLoop();
     }
 }
 
@@ -672,26 +640,14 @@ void TextureCache<P>::SynchronizeDescriptors(bool compute) {
         const bool linked_tsc = kepler_compute->launch_description.linked_tsc;
         const u32 tic_limit = kepler_compute->regs.tic.limit;
         const u32 tsc_limit = linked_tsc ? tic_limit : kepler_compute->regs.tsc.limit;
-        bool bindings_changed = false;
-        if (channel_state->compute_sampler_table.Synchronize(kepler_compute->regs.tsc.Address(), tsc_limit))
-            bindings_changed = true;
-        if (channel_state->compute_image_table.Synchronize(kepler_compute->regs.tic.Address(), tic_limit))
-            bindings_changed = true;
-        if (bindings_changed) {
-            ++texture_bindings_serial;
-        }
+        (void)channel_state->compute_sampler_table.Synchronize(kepler_compute->regs.tsc.Address(), tsc_limit);
+        (void)channel_state->compute_image_table.Synchronize(kepler_compute->regs.tic.Address(), tic_limit);
     } else {
         const bool linked_tsc = maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
         const u32 tic_limit = maxwell3d->regs.tex_header.limit;
         const u32 tsc_limit = linked_tsc ? tic_limit : maxwell3d->regs.tex_sampler.limit;
-        bool bindings_changed = false;
-        if (channel_state->graphics_sampler_table.Synchronize(maxwell3d->regs.tex_sampler.Address(), tsc_limit))
-            bindings_changed = true;
-        if (channel_state->graphics_image_table.Synchronize(maxwell3d->regs.tex_header.Address(), tic_limit))
-            bindings_changed = true;
-        if (bindings_changed) {
-            ++texture_bindings_serial;
-        }
+        (void)channel_state->graphics_sampler_table.Synchronize(maxwell3d->regs.tex_sampler.Address(), tsc_limit);
+        (void)channel_state->graphics_image_table.Synchronize(maxwell3d->regs.tex_header.Address(), tic_limit);
     }
 }
 

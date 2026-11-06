@@ -57,15 +57,9 @@ public:
         }
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
-        // This runs for every texture and sampler of every draw. An entry within one page is
-        // contiguous in host memory, so a single page lookup replaces the generic block read.
-        const bool one_page =
-            (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
-        if (const u8* const host = one_page ? gpu_memory.GetPointer(gpu_addr) : nullptr) {
-            std::memcpy(std::addressof(result.first), host, sizeof(T));
-        } else {
-            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
-        }
+        // A shader may have produced this TIC/TSC entry. Complete only overlapping buffer
+        // writes before comparing it with the previous descriptor and reusing its view/sampler.
+        gpu_memory.ReadResourceBlock(gpu_addr, std::addressof(result.first), sizeof(T));
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
         } else {

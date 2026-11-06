@@ -259,6 +259,10 @@ public:
 
     void DownloadMemory(DAddr device_addr, u64 size);
 
+    /// Complete GPU-produced resource words before CPU decoding, with the cache lock held by
+    /// the caller and pending CPU invalidations already applied.
+    void PrepareResourceRead(DAddr device_addr, u64 size);
+
     std::optional<VideoCore::RasterizerDownloadArea> GetFlushArea(DAddr device_addr, u64 size);
 
     /// Without downloads at every fence, a guest CPU read is the only way GPU-written buffer
